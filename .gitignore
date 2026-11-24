@@ -1,0 +1,10 @@
+# Cargo build output
+/target/
+
+# Everything produced by `cargo am ...` (kernel build, rootfs, initramfs, ISO,
+# VM disks). The rootfs is root-owned: remove it with `cargo am clean --rootfs`.
+/out/
+
+# The Linux kernel source is its own (huge) git repository and not part of
+# this repo. See README "Kernel source" for how to get it.
+/linux/

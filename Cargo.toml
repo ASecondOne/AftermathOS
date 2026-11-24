@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["scripts", "crates/aftermath-init", "crates/aftermath-engine", "crates/aftermath-strata", "crates/aftermath-ctl"]
+# The kernel tree has its own build system (Kbuild) and must never be
+# picked up by Cargo.
+exclude = ["linux"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/<you>/aftermath"
+authors = ["Tim"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+# unwind (not abort): PID 1 catches panics and falls back instead of
+# taking the kernel down with it.
+panic = "unwind"
+strip = true

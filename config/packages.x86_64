@@ -1,0 +1,43 @@
+# Packages pacstrap installs into the Aftermath rootfs (one per line, # = comment).
+#
+# NOTE: this list intentionally avoids Arch's `base` meta package, because
+# `base` pulls in systemd. Some packages still depend on `systemd-libs`
+# (libudev etc.); that is only a library, not the init.
+filesystem
+glibc
+bash
+coreutils
+util-linux
+procps-ng
+psmisc
+shadow
+findutils
+grep
+sed
+gawk
+gzip
+tar
+xz
+zstd
+file
+less
+which
+nano
+kmod
+# Console keymaps + loadkeys (German layout by default, see /etc/aftermath/aftermath.toml)
+kbd
+iproute2
+iputils
+pacman
+archlinux-keyring
+ca-certificates
+
+# Bootloader (config + theme are added from config/grub by `cargo am`)
+grub
+efibootmgr
+
+# Network (dhcpcd, started by aftermath-engine), needed by pacman and apt
+dhcpcd
+
+# Rescue layer: static BusyBox CLI (copied to /usr/lib/aftermath/rescue)
+busybox

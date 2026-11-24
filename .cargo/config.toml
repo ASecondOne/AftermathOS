@@ -1,0 +1,5 @@
+# `cargo am <command>` and `cargo xtask <command>` both run the build tool in
+# ./scripts.  Example: `cargo am check-deps`, `cargo am run`.
+[alias]
+am = "run --quiet --package xtask --"
+xtask = "run --quiet --package xtask --"

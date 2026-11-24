@@ -1,0 +1,12 @@
+# Example service (off by default). Try it:
+#   amctl services start heartbeat
+#   amctl services status heartbeat
+#   amctl logs -f --service heartbeat
+#   amctl services enable heartbeat     # also start it at every boot
+#
+# Format: see README "Services" (all keys except `exec` are optional).
+description = "Example: prints a heartbeat every 5 seconds"
+exec = ["/usr/bin/bash", "-c", "while true; do echo \"heartbeat $(date +%T)\"; sleep 5; done"]
+restart = "always"
+restart_delay = 1
+enabled = false

@@ -1,0 +1,14 @@
+# Aftermath system settings. Read by aftermath-engine at boot and by amctl.
+
+[locale]
+# Console keyboard layout (a kbd keymap name, see /usr/share/kbd/keymaps).
+# German without dead keys by default. Change it here or with
+# `amctl keymap set <name>` (e.g. "us", "de-latin1", "de_CH-latin1").
+keymap = "de-latin1-nodeadkeys"
+
+# X11 / Wayland layout for the (future) desktop. The engine writes
+# /etc/X11/xorg.conf.d/00-keyboard.conf from these at every boot.
+xkb_layout = "de"
+xkb_variant = "nodeadkeys"
+xkb_model = "pc105"
+xkb_options = ""

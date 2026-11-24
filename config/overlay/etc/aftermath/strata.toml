@@ -1,0 +1,48 @@
+# Aftermath strata configuration, read at boot by aftermath-strata (and by
+# `strat` and `cargo am stratum list`).
+#
+# A stratum is a full userland (its own /usr, libs, package manager) living
+# under /aftermath/strata/<name>, in the spirit of Bedrock Linux. Strata other
+# than the host come from the strata disk (ext4, label AFTERMATH_STRATA,
+# built by `cargo am stratum ubuntu`). If the disk or every stratum fails,
+# Aftermath boots in plain Arch host mode (plan B).
+
+[[stratum]]
+name = "arch"
+# The Arch userland the system boots from is the "host" stratum.
+path = "/"
+kind = "host"
+enabled = true
+
+[[stratum]]
+name = "ubuntu"
+# Ubuntu 24.04 LTS (noble): apt, apt-get, apt-cache, dpkg, add-apt-repository.
+path = "/aftermath/strata/ubuntu"
+kind = "debian"
+enabled = true
+
+[[stratum]]
+name = "windows"
+# Future: native Windows toolchain/runtime stratum (wine-like, not wine).
+path = "/aftermath/strata/windows"
+kind = "windows"
+enabled = false
+
+[cross]
+# Commands without a pin: the first stratum in this list that has it wins
+# (host first, so `ls`, `bash`, ... are always Arch's).
+order = ["arch", "ubuntu"]
+
+[cross.pin]
+# Package managers always run in their own stratum, from the same shell.
+# Patterns may use * and ?; exact names beat patterns.
+pacman = "arch"
+"pacman-*" = "arch"
+makepkg = "arch"
+"apt" = "ubuntu"
+"apt-*" = "ubuntu"
+"dpkg" = "ubuntu"
+"dpkg-*" = "ubuntu"
+"debconf*" = "ubuntu"
+"add-apt-repository" = "ubuntu"
+"update-alternatives" = "ubuntu"

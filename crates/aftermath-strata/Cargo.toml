@@ -1,0 +1,24 @@
+[package]
+name = "aftermath-strata"
+description = "Aftermath strata: Bedrock-style shared mounts, cross-stratum launchers and `strat`"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "aftermath-strata"
+path = "src/bin/aftermath-strata.rs"
+
+[[bin]]
+name = "strat"
+path = "src/bin/strat.rs"
+
+[dependencies]
+libc = "0.2"
+nix = { version = "0.29", features = ["mount", "fs", "process", "user"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

@@ -1,0 +1,21 @@
+[package]
+name = "xtask"
+description = "Aftermath build tool: kernel, rootfs, initramfs, ISO and QEMU"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+png = "0.17"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Shared strata config parsing (strata.toml) for `cargo am stratum list`.
+aftermath-strata = { path = "../crates/aftermath-strata" }
+# Keyboard config parsing (aftermath.toml [locale]) for the keymap staging.
+aftermath-ctl = { path = "../crates/aftermath-ctl" }
