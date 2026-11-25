@@ -11,7 +11,7 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "amctl"
-path = "src/bin/amctl.rs"
+path = "src/bin/amctl/main.rs"
 
 [dependencies]
 libc = "0.2"

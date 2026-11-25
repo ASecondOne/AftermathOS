@@ -1,0 +1,165 @@
+//! Command-line interface of amctl (clap). Only the shape of the commands
+//! lives here; what they do is in the sibling modules.
+
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "amctl",
+    bin_name = "amctl",
+    version,
+    about = "Aftermath control: status, strata, services, logs, boot and power",
+    after_help = "Examples:\n  amctl status\n  amctl strata list\n  amctl strata enter ubuntu\n  \
+                  amctl services restart heartbeat\n  amctl logs -f --service heartbeat\n  \
+                  amctl boot next host\n  amctl overlay reset"
+)]
+pub struct Cli {
+    /// Machine-readable JSON output (for scripts)
+    #[arg(long, global = true)]
+    pub json: bool,
+    /// No colours
+    #[arg(long, global = true)]
+    pub no_color: bool,
+    #[command(subcommand)]
+    pub cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+pub enum Cmd {
+    /// Overview: mode, root/overlay, network, strata, services, uptime
+    Status,
+    /// Strata (Arch host, Ubuntu, ...)
+    #[command(subcommand)]
+    Strata(StrataCmd),
+    /// Services from /etc/aftermath/services/*.toml
+    #[command(subcommand, visible_alias = "svc")]
+    Services(SvcCmd),
+    /// Session logs of this boot (consoles, kernel, services)
+    Logs(LogsArgs),
+    /// Power off cleanly
+    Poweroff,
+    /// Reboot cleanly
+    Reboot,
+    /// GRUB: pick the next boot once
+    #[command(subcommand)]
+    Boot(BootCmd),
+    /// The persistent host root (overlay disk)
+    #[command(subcommand)]
+    Overlay(OverlayCmd),
+    /// Keyboard layout: show, or `amctl keymap set <name>`
+    Keymap {
+        #[command(subcommand)]
+        cmd: Option<KeymapCmd>,
+    },
+    /// Subsystems the engine offers
+    Subsystems,
+    /// Print shell completions (bash, zsh, fish, ...)
+    Completions { shell: clap_complete::Shell },
+}
+
+#[derive(Subcommand)]
+pub enum StrataCmd {
+    /// All strata and their state
+    List,
+    /// One stratum in detail
+    Status {
+        name: String,
+    },
+    Start {
+        name: String,
+    },
+    Stop {
+        name: String,
+    },
+    Restart {
+        name: String,
+    },
+    /// Start now and at every boot
+    Enable {
+        name: String,
+    },
+    /// Stop now and keep it off at boot
+    Disable {
+        name: String,
+    },
+    /// A shell (or a command) inside a stratum
+    Enter {
+        name: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        cmd: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SvcCmd {
+    List,
+    Status {
+        name: String,
+    },
+    Start {
+        name: String,
+    },
+    Stop {
+        name: String,
+    },
+    Restart {
+        name: String,
+    },
+    /// Start now and at every boot
+    Enable {
+        name: String,
+    },
+    /// Stop now and keep it off at boot
+    Disable {
+        name: String,
+    },
+    /// Re-read /etc/aftermath/services
+    Reload,
+}
+
+#[derive(Subcommand)]
+pub enum BootCmd {
+    /// normal | host | busybox | clean | serial | debug | none (cancel)
+    Next { target: String },
+    /// What GRUB will do next
+    Status,
+}
+
+#[derive(Subcommand)]
+pub enum OverlayCmd {
+    Status,
+    /// Throw away all saved changes on the next boot
+    Reset {
+        /// Withdraw a pending reset
+        #[arg(long)]
+        cancel: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum KeymapCmd {
+    /// Load a console keymap now and save it in /etc/aftermath/aftermath.toml
+    Set { name: String },
+}
+
+#[derive(clap::Args)]
+pub struct LogsArgs {
+    /// Keep printing new lines
+    #[arg(short, long)]
+    pub follow: bool,
+    /// Number of lines to show
+    #[arg(short = 'n', long, default_value_t = 40)]
+    pub lines: usize,
+    /// A service's log
+    #[arg(long, conflicts_with_all = ["kernel", "console"])]
+    pub service: Option<String>,
+    /// The whole kernel log (default: only Aftermath's own messages)
+    #[arg(long, conflicts_with = "console")]
+    pub kernel: bool,
+    /// A console's log, e.g. tty1 or ttyS0
+    #[arg(long)]
+    pub console: Option<String>,
+    /// List the log files of this boot
+    #[arg(long)]
+    pub list: bool,
+}

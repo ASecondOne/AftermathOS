@@ -86,39 +86,57 @@ pub fn start() -> Option<Receiver<Job>> {
     }
 }
 
+/// One client connection: read a single JSON request line, hand it to the
+/// engine loop, write the single JSON answer back.
 fn serve(conn: UnixStream, tx: Sender<Job>) {
     let _ = conn.set_read_timeout(Some(Duration::from_secs(5)));
-    let uid = match getsockopt(&conn, PeerCredentials) {
-        Ok(c) => c.uid(),
-        Err(_) => u32::MAX, // unknown caller: queries only
+    let uid = caller_uid(&conn);
+
+    let Some(line) = read_request(&conn) else {
+        return; // closed or timed out before sending anything
     };
-    let mut line = String::new();
-    let mut reader = BufReader::new((&conn).take(MAX_LINE as u64));
-    let resp = match reader.read_line(&mut line) {
-        Ok(0) | Err(_) => return,
-        Ok(_) => match serde_json::from_str::<Request>(&line) {
-            Err(e) => Response::err(format!("bad request: {e}")),
-            Ok(req) => {
-                let (rtx, rrx) = mpsc::channel();
-                if tx
-                    .send(Job {
-                        req,
-                        uid,
-                        reply: rtx,
-                    })
-                    .is_err()
-                {
-                    Response::err("the engine is shutting down")
-                } else {
-                    rrx.recv_timeout(TIMEOUT)
-                        .unwrap_or_else(|_| Response::err("the engine did not answer in time"))
-                }
-            }
-        },
+
+    let resp = match serde_json::from_str::<Request>(&line) {
+        Ok(req) => ask_engine(&tx, req, uid),
+        Err(e) => Response::err(format!("bad request: {e}")),
     };
+
     let mut out = serde_json::to_string(&resp).unwrap_or_else(|_| "{\"ok\":false}".into());
     out.push('\n');
     let _ = (&conn).write_all(out.as_bytes());
+}
+
+/// The caller's uid from SO_PEERCRED. Unknown callers get an impossible
+/// uid, so they can only ask queries.
+fn caller_uid(conn: &UnixStream) -> u32 {
+    match getsockopt(conn, PeerCredentials) {
+        Ok(cred) => cred.uid(),
+        Err(_) => u32::MAX,
+    }
+}
+
+/// The first line of the request, at most MAX_LINE bytes.
+fn read_request(conn: &UnixStream) -> Option<String> {
+    let mut line = String::new();
+    let mut reader = BufReader::new(conn.take(MAX_LINE as u64));
+
+    match reader.read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(line),
+    }
+}
+
+/// Queue the request for the engine loop and wait (bounded) for its answer.
+fn ask_engine(tx: &Sender<Job>, req: Request, uid: u32) -> Response {
+    let (reply, answer) = mpsc::channel();
+
+    if tx.send(Job { req, uid, reply }).is_err() {
+        return Response::err("the engine is shutting down");
+    }
+
+    answer
+        .recv_timeout(TIMEOUT)
+        .unwrap_or_else(|_| Response::err("the engine did not answer in time"))
 }
 
 pub struct Registry {

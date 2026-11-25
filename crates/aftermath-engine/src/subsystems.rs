@@ -287,14 +287,7 @@ impl Subsystem for Locale {
                 if !locale::valid_keymap(&name) {
                     return Err(format!("invalid keymap name `{name}`"));
                 }
-                let root = Path::new("/");
-                let how = locale::load_keymap(root, &name)?;
-                let text = fs::read_to_string(locale::CONFIG).unwrap_or_default();
-                fs::write(locale::CONFIG, locale::set_keymap_in(&text, &name))
-                    .map_err(|e| format!("{}: {e}", locale::CONFIG))?;
-                let (l, _) = locale::load(root);
-                locale::write_derived(&l, root);
-                let _ = fs::write("/run/aftermath/keymap", format!("{name}\n"));
+                let how = locale::apply_keymap(Path::new("/"), &name)?;
                 self.loaded = Some(name.clone());
                 crate::log(&format!("console keymap {name} loaded ({how}) via amctl"));
                 Ok(json!({"keymap": name, "how": how}))

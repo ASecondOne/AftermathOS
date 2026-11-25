@@ -83,6 +83,7 @@ pub fn valid_keymap(name: &str) -> bool {
         && !name.starts_with('.')
 }
 
+/// /etc/vconsole.conf (read by tools that expect the systemd-style file).
 pub fn vconsole_conf(l: &Locale) -> String {
     format!(
         "# Generated from /etc/aftermath/aftermath.toml [locale] at boot - edit that file\n\
@@ -92,26 +93,31 @@ pub fn vconsole_conf(l: &Locale) -> String {
     )
 }
 
+/// /etc/X11/xorg.conf.d/00-keyboard.conf. Empty settings are left out.
 pub fn xorg_conf(l: &Locale) -> String {
-    let mut s = String::from(
-        "# Generated from /etc/aftermath/aftermath.toml [locale] at boot - edit that file,\n\
-         # not this one. Read by X11 and by Wayland compositors that honour it.\n\
-         Section \"InputClass\"\n\
-         \x20   Identifier \"system-keyboard\"\n\
-         \x20   MatchIsKeyboard \"on\"\n",
-    );
-    for (k, v) in [
+    let mut lines = vec![
+        "# Generated from /etc/aftermath/aftermath.toml [locale] at boot - edit that file,"
+            .to_string(),
+        "# not this one. Read by X11 and by Wayland compositors that honour it.".to_string(),
+        "Section \"InputClass\"".to_string(),
+        "    Identifier \"system-keyboard\"".to_string(),
+        "    MatchIsKeyboard \"on\"".to_string(),
+    ];
+
+    let options = [
         ("XkbLayout", &l.xkb_layout),
         ("XkbModel", &l.xkb_model),
         ("XkbVariant", &l.xkb_variant),
         ("XkbOptions", &l.xkb_options),
-    ] {
-        if !v.is_empty() {
-            s.push_str(&format!("    Option \"{k}\" \"{v}\"\n"));
+    ];
+    for (key, value) in options {
+        if !value.is_empty() {
+            lines.push(format!("    Option \"{key}\" \"{value}\""));
         }
     }
-    s.push_str("EndSection\n");
-    s
+
+    lines.push("EndSection".to_string());
+    lines.join("\n") + "\n"
 }
 
 /// Write the derived files under `root` if they differ. Returns the changed paths.
@@ -136,33 +142,66 @@ pub fn write_derived(l: &Locale, root: &Path) -> Vec<String> {
 }
 
 /// Change `keymap = ...` in aftermath.toml, keeping comments and the rest.
+///
+/// Line by line: inside the `[locale]` table the existing `keymap` line is
+/// replaced. If the table has no such line, one is added at the end of the
+/// table; if there is no `[locale]` table at all, it is appended.
 pub fn set_keymap_in(text: &str, keymap: &str) -> String {
+    let new_line = format!("keymap = \"{keymap}\"\n");
     let mut out = String::new();
-    let (mut in_locale, mut done, mut saw_locale) = (false, false, false);
+    let mut in_locale = false;
+    let mut saw_locale = false;
+    let mut done = false;
+
     for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with('[') {
+        let trimmed = line.trim();
+        let is_table_header = trimmed.starts_with('[');
+        let is_keymap_key = trimmed.split('=').next().map(str::trim) == Some("keymap");
+
+        if is_table_header {
+            // Leaving [locale] without having seen `keymap`: add it here.
             if in_locale && !done {
-                out.push_str(&format!("keymap = \"{keymap}\"\n"));
+                out.push_str(&new_line);
                 done = true;
             }
-            in_locale = t == "[locale]";
+            in_locale = trimmed == "[locale]";
             saw_locale |= in_locale;
-        } else if in_locale && !done && t.split('=').next().map(str::trim) == Some("keymap") {
-            out.push_str(&format!("keymap = \"{keymap}\"\n"));
+        } else if in_locale && !done && is_keymap_key {
+            out.push_str(&new_line);
             done = true;
-            continue;
+            continue; // drop the old line
         }
+
         out.push_str(line);
         out.push('\n');
     }
+
     if !done {
         if !saw_locale {
             out.push_str("\n[locale]\n");
         }
-        out.push_str(&format!("keymap = \"{keymap}\"\n"));
+        out.push_str(&new_line);
     }
     out
+}
+
+/// `amctl keymap set`: load `name` now, save it in aftermath.toml,
+/// regenerate the derived files and note it in /run/aftermath/keymap.
+/// Returns how it was loaded. Nothing is saved if loading fails.
+pub fn apply_keymap(root: &Path, name: &str) -> Result<String, String> {
+    let how = load_keymap(root, name)?;
+
+    let config = root.join(CONFIG.trim_start_matches('/'));
+    let text = fs::read_to_string(&config).unwrap_or_default();
+    fs::write(&config, set_keymap_in(&text, name))
+        .map_err(|e| format!("{}: {e}", config.display()))?;
+
+    let (locale, _) = load(root);
+    write_derived(&locale, root);
+
+    let note = root.join("run/aftermath/keymap");
+    let _ = fs::write(note, format!("{name}\n"));
+    Ok(how)
 }
 
 // ------------------------------------------------------------- loading ----
@@ -186,18 +225,24 @@ pub fn parse_bmap(data: &[u8]) -> Result<Vec<(u8, u8, u16)>, String> {
     let rest = data
         .strip_prefix(MAGIC)
         .ok_or("not a binary keymap (missing bkeymap magic)")?;
+
     if rest.len() < MAX_NR_KEYMAPS {
         return Err("binary keymap truncated".into());
     }
+
+    // Which modifier tables follow, in order.
     let (flags, body) = rest.split_at(MAX_NR_KEYMAPS);
     let tables: Vec<usize> = (0..MAX_NR_KEYMAPS).filter(|&i| flags[i] != 0).collect();
     if tables.is_empty() || body.len() % (tables.len() * 2) != 0 {
         return Err("binary keymap has an unexpected size".into());
     }
+
+    // Every table has the same number of keys, two bytes each.
     let keys = body.len() / tables.len() / 2;
     if keys == 0 || keys > 256 {
         return Err("binary keymap has an unexpected size".into());
     }
+
     let mut out = Vec::with_capacity(tables.len() * keys);
     for (t, chunk) in tables.iter().zip(body.chunks(keys * 2)) {
         for (k, v) in chunk.chunks(2).enumerate() {
@@ -217,10 +262,13 @@ fn vt() -> Result<File, String> {
     Err("no virtual terminal to load the keymap into (/dev/tty0)".into())
 }
 
+/// The built-in loader (plan B when kbd is missing): send every entry of a
+/// binary keymap to the kernel with KDSKBENT. Returns how many it accepted.
 pub fn load_bmap(path: &Path) -> Result<usize, String> {
     let data = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let entries = parse_bmap(&data)?;
     let f = vt()?;
+
     let mut n = 0;
     for (table, index, value) in entries {
         let e = KbEntry {
@@ -233,41 +281,54 @@ pub fn load_bmap(path: &Path) -> Result<usize, String> {
             n += 1;
         }
     }
+
     if n == 0 {
         return Err("the kernel accepted no key from the keymap".into());
     }
     Ok(n)
 }
 
-/// Load `name` into the console: loadkeys if present, else the built-in
-/// loader. Returns a short description of how it was loaded.
+/// Load `name` into the console: kbd's loadkeys if present, else the
+/// built-in loader. Returns a short description of how it was loaded, or
+/// why both ways failed.
 pub fn load_keymap(root: &Path, name: &str) -> Result<String, String> {
     if !valid_keymap(name) {
         return Err(format!("invalid keymap name `{name}`"));
     }
-    let mut why = Vec::new();
+
+    let mut failures = Vec::new();
+
     if root.join(LOADKEYS.trim_start_matches('/')).exists() {
-        let out = Command::new(LOADKEYS)
-            .args(["-q", "-C", "/dev/tty0", name])
-            .stdin(Stdio::null())
-            .output();
-        match out {
-            Ok(o) if o.status.success() => return Ok("loadkeys".into()),
-            Ok(o) => why.push(format!(
-                "loadkeys: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            )),
-            Err(e) => why.push(format!("loadkeys: {e}")),
+        match run_loadkeys(name) {
+            Ok(()) => return Ok("loadkeys".into()),
+            Err(e) => failures.push(e),
         }
     }
+
     let bmap = root
         .join(BMAP_DIR.trim_start_matches('/'))
         .join(format!("{name}.bmap"));
     match load_bmap(&bmap) {
-        Ok(n) => return Ok(format!("built-in loader, {n} keys")),
-        Err(e) => why.push(e),
+        Ok(keys) => return Ok(format!("built-in loader, {keys} keys")),
+        Err(e) => failures.push(e),
     }
-    Err(why.join("; "))
+
+    Err(failures.join("; "))
+}
+
+fn run_loadkeys(name: &str) -> Result<(), String> {
+    let output = Command::new(LOADKEYS)
+        .args(["-q", "-C", "/dev/tty0", name])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("loadkeys: {e}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("loadkeys: {}", stderr.trim()))
+    }
 }
 
 /// Self-check: what the key at the US "Y" position (keycode 21) types.
