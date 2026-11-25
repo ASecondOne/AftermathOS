@@ -37,11 +37,10 @@ pub struct RunArgs {
     #[arg(long, conflicts_with = "bios")]
     pub uefi: bool,
     /// Use legacy BIOS instead of the default UEFI firmware.
-    /// Large desktop initramfs images may exceed the BIOS loader's limits.
     #[arg(long, conflicts_with = "uefi")]
     pub bios: bool,
-    /// Guest RAM. The Plasma rootfs and desktop live in RAM; use at least 8G.
-    #[arg(long, short, default_value = "8G")]
+    /// Guest RAM. The live root stays on disk; Plasma is tested with 4G.
+    #[arg(long, short, default_value = "4G")]
     pub mem: String,
     /// Number of virtual CPUs.
     #[arg(long, short, default_value_t = 4)]
@@ -150,7 +149,7 @@ pub fn run(ctx: &Ctx, a: &RunArgs) -> Result<()> {
     }
 
     if a.direct {
-        for p in [ctx.kernel_image(), ctx.initramfs()] {
+        for p in [ctx.kernel_image(), ctx.initramfs(), ctx.root_image()] {
             require(ctx, &p)?;
         }
         // Shells start on every console; the last console= is /dev/console.
@@ -169,6 +168,10 @@ pub fn run(ctx: &Ctx, a: &RunArgs) -> Result<()> {
         q.arg("-kernel").arg(ctx.kernel_image());
         q.arg("-initrd").arg(ctx.initramfs());
         q.arg("-append").arg(cmdline);
+        q.arg("-drive").arg(format!(
+            "file={},format=raw,if=virtio,readonly=on",
+            ctx.root_image().display()
+        ));
     } else if a.iso {
         require(ctx, &ctx.iso())?;
         q.arg("-drive").arg(format!(
@@ -318,7 +321,7 @@ mod tests {
     fn desktop_boot_defaults_to_uefi_with_explicit_bios_fallback() {
         let default = parse(&["run"]);
         assert!(uses_uefi(&default));
-        assert_eq!(default.mem, "8G");
+        assert_eq!(default.mem, "4G");
         assert!(uses_uefi(&parse(&["run", "--iso"])));
         assert!(!uses_uefi(&parse(&["run", "--bios"])));
         assert!(!uses_uefi(&parse(&["run", "--direct"])));

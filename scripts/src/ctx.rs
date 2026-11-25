@@ -52,6 +52,10 @@ impl Ctx {
     pub fn initramfs(&self) -> PathBuf {
         self.out.join("initramfs-aftermath.img")
     }
+    /// Disk-backed live root, also included in the GRUB disk and ISO.
+    pub fn root_image(&self) -> PathBuf {
+        self.out.join("rootfs-aftermath.squashfs")
+    }
     pub fn iso_root(&self) -> PathBuf {
         self.out.join("iso-root")
     }

@@ -379,6 +379,15 @@ menuentry "Aftermath OS (serial console)" --id aftermath-serial --class aftermat
     fi
 }}
 
+menuentry "Aftermath OS (console only, graphical login disabled)" --id aftermath-console --class recovery {{
+    if linux /boot/vmlinuz-aftermath {CMDLINE_BASE} aftermath.desktop=off {normal} ${{aftermath_args}}; then
+        if initrd /boot/initramfs-aftermath.img; then
+            aftermath_boot_attempt
+            boot
+        fi
+    fi
+}}
+
 menuentry "Aftermath OS (Arch host only, no strata)" --id aftermath-host --class recovery {{
     if linux /boot/vmlinuz-aftermath {CMDLINE_BASE} aftermath.mode=host {normal} ${{aftermath_args}}; then
         if initrd /boot/initramfs-aftermath.img; then
@@ -440,6 +449,7 @@ pub fn ensure_disk(ctx: &Ctx) -> Result<()> {
     let inputs = [
         mtime(&ctx.kernel_image()),
         mtime(&ctx.initramfs()),
+        mtime(&ctx.root_image()),
         newest_mtime(&tree(ctx)),
     ];
     if is_stale(&disk_image(ctx), &inputs) {
@@ -452,7 +462,7 @@ pub fn ensure_disk(ctx: &Ctx) -> Result<()> {
 /// The FAT partition holds EFI/BOOT/BOOTX64.EFI, /boot/grub, kernel, initramfs.
 /// `grubenv`: extra variables for the boot partition's grubenv (e.g. test hooks).
 pub fn build_disk(ctx: &Ctx, grubenv: &[(String, String)]) -> Result<()> {
-    for p in [ctx.kernel_image(), ctx.initramfs()] {
+    for p in [ctx.kernel_image(), ctx.initramfs(), ctx.root_image()] {
         if !p.exists() && !ctx.dry_run {
             bail!(
                 "{} missing (run `cargo am kernel` / `cargo am initramfs`)",
@@ -480,7 +490,7 @@ pub fn build_disk(ctx: &Ctx, grubenv: &[(String, String)]) -> Result<()> {
     ctx.run(&mut c)?;
 
     // 2. FAT32 partition image, filled with mtools (no mount, no root).
-    let payload = [ctx.kernel_image(), ctx.initramfs()]
+    let payload = [ctx.kernel_image(), ctx.initramfs(), ctx.root_image()]
         .iter()
         .map(|p| fs::metadata(p).map(|m| m.len()).unwrap_or(0))
         .sum::<u64>();
@@ -527,6 +537,11 @@ pub fn build_disk(ctx: &Ctx, grubenv: &[(String, String)]) -> Result<()> {
         mtool("mcopy")
             .arg(ctx.initramfs())
             .arg("::/boot/initramfs-aftermath.img"),
+    )?;
+    ctx.run(
+        mtool("mcopy")
+            .arg(ctx.root_image())
+            .arg("::/boot/rootfs-aftermath.squashfs"),
     )?;
 
     // 3. Assemble the disk: MBR (boot.img + partition table), core.img, ESP.
@@ -748,7 +763,7 @@ mod tests {
             .skip(1)
             .filter(|e| e.contains("linux /boot/vmlinuz"))
             .collect();
-        assert_eq!(entries.len(), 6);
+        assert_eq!(entries.len(), 7);
 
         for entry in entries {
             let linux = entry.find("if linux ").expect("linux is checked");

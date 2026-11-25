@@ -11,6 +11,7 @@ mod desktop_smoke;
 mod grub;
 mod image;
 mod kernel;
+mod live_image;
 mod logs;
 mod persist;
 mod plasma;
@@ -73,8 +74,8 @@ enum Cmd {
     Init,
     /// Create the Arch rootfs in out/rootfs with pacstrap (needs sudo).
     Rootfs(image::RootfsArgs),
-    /// Copy init + overlay + kernel modules into the rootfs and pack it as
-    /// out/initramfs-aftermath.img (needs sudo, the rootfs is root-owned).
+    /// Stage the rootfs, build its SquashFS image and a small rescue initramfs
+    /// (needs sudo, the rootfs is root-owned).
     Initramfs,
     /// Generate the GRUB menu, theme and fonts (out/grub), and with --disk
     /// also the BIOS+UEFI bootable disk image (no sudo needed).

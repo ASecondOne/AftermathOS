@@ -84,6 +84,7 @@ const DEPS: &[Dep] = &[
     // initramfs
     bin("bsdtar", "libarchive", "initramfs (cpio packing)"),
     bin("zstd", "zstd", "initramfs"),
+    bin("mksquashfs", "squashfs-tools", "disk-backed live root"),
     // iso
     bin("grub-mkrescue", "grub", "iso"),
     file(
@@ -136,12 +137,6 @@ const DEPS: &[Dep] = &[
     bin("qemu-system-x86_64", "qemu-desktop", "run"),
     bin("qemu-img", "qemu-img", "run --disk"),
     file(OVMF_CODE, "edk2-ovmf", "default UEFI boot"),
-    // future
-    optional(bin(
-        "mksquashfs",
-        "squashfs-tools",
-        "future: squashfs live image",
-    )),
 ];
 
 pub fn check_deps() -> Result<()> {

@@ -1,9 +1,7 @@
 //! init binary, rootfs, initramfs, ISO and clean.
 //!
-//! Boot design (for now): the whole rootfs is packed into one zstd cpio
-//! initramfs. The kernel unpacks it into RAM and runs `rdinit=/usr/bin/init`
-//! (our aftermath-init) directly, so there is no mkinitcpio, no squashfs and
-//! no switch_root yet. Simple and fast to iterate on; see README "Next steps".
+//! A small static bootstrap mounts the SquashFS live root from disk or ISO.
+//! Saved changes remain on the existing AFTERMATH_HOST overlay disk.
 
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
@@ -193,8 +191,9 @@ pub fn ensure_initramfs(ctx: &Ctx) -> Result<()> {
         newest_mtime(&grub::tree(ctx)),
         mtime(&ctx.kernel_image()),
         mtime(&ctx.out.join("plasma/built")),
+        mtime(&ctx.root.join("scripts/src/live_image.rs")),
     ];
-    if is_stale(&ctx.initramfs(), &inputs) {
+    if is_stale(&ctx.initramfs(), &inputs) || is_stale(&ctx.root_image(), &inputs) {
         pack_initramfs(ctx, &init)
     } else {
         println!("initramfs is up to date: {}", ctx.initramfs().display());
@@ -331,21 +330,8 @@ fn pack_initramfs(ctx: &Ctx, init: &Path) -> Result<()> {
         println!("(no kernel modules staged yet; run `cargo am kernel`)");
     }
 
-    // 4. Pack the rootfs as a zstd-compressed newc cpio archive.
-    let mut tar = sudo([
-        "bsdtar", "--format", "newc", "--zstd", "-c", "-f", "-", "-C",
-    ]);
-    tar.arg(&rootfs).arg(".");
-    ctx.run_to_file(&mut tar, &ctx.initramfs())?;
-    if !ctx.dry_run {
-        let size = fs::metadata(ctx.initramfs())?.len();
-        println!(
-            "initramfs: {} ({} MiB)",
-            ctx.initramfs().display(),
-            size >> 20
-        );
-    }
-    Ok(())
+    // 4. Keep desktop data on disk and build an independent rescue bootstrap.
+    crate::live_image::build(ctx, &rootfs, init, true)
 }
 
 /// Recursively copy a user-owned tree (files, dirs, symlinks).
@@ -462,7 +448,11 @@ pub fn ensure_iso(ctx: &Ctx) -> Result<()> {
     iso_inputs_ready(ctx)?;
     if is_stale(
         &ctx.iso(),
-        &[mtime(&ctx.kernel_image()), mtime(&ctx.initramfs())],
+        &[
+            mtime(&ctx.kernel_image()),
+            mtime(&ctx.initramfs()),
+            mtime(&ctx.root_image()),
+        ],
     ) {
         build_iso(ctx)
     } else {
@@ -484,6 +474,7 @@ fn build_iso(ctx: &Ctx) -> Result<()> {
     for (src, name) in [
         (ctx.kernel_image(), "vmlinuz-aftermath"),
         (ctx.initramfs(), "initramfs-aftermath.img"),
+        (ctx.root_image(), "rootfs-aftermath.squashfs"),
     ] {
         println!(
             "==> link {} -> {}",
@@ -539,6 +530,8 @@ pub fn clean(ctx: &Ctx, a: &CleanArgs) -> Result<()> {
     ctx.remove(&ctx.overlay_stage())?;
     ctx.remove(&ctx.iso_root())?;
     ctx.remove(&ctx.initramfs())?;
+    ctx.remove(&ctx.root_image())?;
+    ctx.remove(&ctx.out.join("bootstrap"))?;
     ctx.remove(&ctx.initramfs().with_extension("partial"))?;
     ctx.remove(&ctx.iso())?;
     if a.kernel || a.all {
