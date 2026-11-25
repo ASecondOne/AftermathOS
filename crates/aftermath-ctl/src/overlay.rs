@@ -21,8 +21,8 @@ const TMP_MNT: &str = "/run/aftermath/hostdisk-tmp";
 
 pub fn status() -> Value {
     let root = disks::mount_of(Path::new("/"));
-    let persistent = root.as_ref().is_some_and(|(_, t)| t == "overlay");
     let disk = disks::mount_of(Path::new(HOSTDISK)).map(|(s, _)| s);
+    let persistent = root.as_ref().is_some_and(|(_, t)| t == "overlay") && disk.is_some();
     let pending = Path::new(HOSTDISK).join(RESET_MARKER).exists();
     let usage = disk.as_ref().and_then(|_| usage(Path::new(HOSTDISK)));
     json!({

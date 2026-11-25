@@ -36,6 +36,7 @@ pub const NEXT_TARGETS: &[(&str, &str)] = &[
     ("busybox", "aftermath-busybox"),
     ("clean", "aftermath-clean"),
     ("serial", "aftermath-serial"),
+    ("console", "aftermath-console"),
     ("debug", "aftermath-debug"),
 ];
 
@@ -87,6 +88,9 @@ fn parse(text: &str) -> Vars {
 pub fn with_grubenv<T>(
     mut f: impl FnMut(&Path) -> io::Result<T>,
 ) -> io::Result<Option<(String, T)>> {
+    if let Some(device) = live_boot_medium()? {
+        return on_live_medium(&device, f).map(Some);
+    }
     fs::create_dir_all(MNT)?;
     for e in fs::read_dir("/sys/class/block")?.flatten() {
         if !e.path().join("partition").exists() {
@@ -117,6 +121,52 @@ pub fn with_grubenv<T>(
         }
     }
     Ok(None)
+}
+
+/// The live root keeps its boot medium mounted read-only for the loop image.
+/// Reuse that mount so a second read-write mount cannot conflict with it.
+fn live_boot_medium() -> io::Result<Option<String>> {
+    let mounts = fs::read_to_string("/proc/self/mountinfo")?;
+    for line in mounts.lines() {
+        let Some((before, after)) = line.split_once(" - ") else {
+            continue;
+        };
+        if before.split_whitespace().nth(4) != Some("/aftermath/image/media") {
+            continue;
+        }
+        let mut fields = after.split_whitespace();
+        if fields.next() == Some("vfat") {
+            return Ok(fields.next().map(str::to_owned));
+        }
+    }
+    Ok(None)
+}
+
+/// Change only grubenv, flush it, then restore the medium's read-only policy.
+fn on_live_medium<T>(
+    device: &str,
+    mut f: impl FnMut(&Path) -> io::Result<T>,
+) -> io::Result<(String, T)> {
+    const MEDIA: &str = "/aftermath/image/media";
+    mount(
+        None::<&str>,
+        MEDIA,
+        None::<&str>,
+        MsFlags::MS_REMOUNT | MsFlags::MS_NOATIME,
+        None::<&str>,
+    )?;
+    let result = f(&Path::new(MEDIA).join(ENV));
+    let restored = mount(
+        None::<&str>,
+        MEDIA,
+        None::<&str>,
+        MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY | MsFlags::MS_NOATIME,
+        None::<&str>,
+    );
+    // Preserve the operation's error while still attempting to restore policy.
+    let value = result?;
+    restored?;
+    Ok((device.to_owned(), value))
 }
 
 /// Set `updates` in a GRUB environment block, keeping other variables.

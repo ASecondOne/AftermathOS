@@ -251,21 +251,11 @@ fn shell_command(log_file: Option<&Path>) -> Command {
     }
 }
 
-/// Is / the persistent overlay (aftermath-early) or the plain RAM image?
+/// A temporary SquashFS upper layer is writable but does not save changes.
 fn root_note() -> String {
-    let info = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-    let overlay = info.lines().any(|l| {
-        let mut halves = l.split(" - ");
-        let left = halves.next().unwrap_or("");
-        let fstype = halves
-            .next()
-            .and_then(|r| r.split(' ').next())
-            .unwrap_or("");
-        left.split(' ').nth(4) == Some("/") && fstype == "overlay"
-    });
-    if overlay {
+    if aftermath_ctl::overlay::status()["persistent"] == true {
         format!("{PURPLE}Changes to the system are saved (host overlay disk).{RESET}\n")
     } else {
-        format!("{RED}RAM root: changes to the system are lost at poweroff.{RESET}\n")
+        format!("{RED}Temporary writable root: changes are lost at poweroff.{RESET}\n")
     }
 }

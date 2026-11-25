@@ -32,6 +32,9 @@ use std::time::Duration;
 use nix::mount::{mount, umount2, MntFlags, MsFlags};
 use nix::unistd::{chdir, chroot};
 
+#[path = "early/live.rs"]
+mod live;
+
 const LABEL: &str = "AFTERMATH_HOST";
 const WORK: &str = "/.aftermath-early";
 /// Where the overlay disk stays mounted in the new root.
@@ -64,7 +67,7 @@ fn warn(msg: &str) {
 fn main() {
     panic::set_hook(Box::new(|info| warn(&format!("PANIC: {info}"))));
     let root = match panic::catch_unwind(AssertUnwindSafe(run)) {
-        Ok(Ok(dev)) => format!("overlay:{dev}"),
+        Ok(Ok(root)) => root,
         Ok(Err(Skip::Quiet(why))) => {
             with_dev(|| log(&format!("RAM root ({why})")));
             "ram".into()
@@ -79,7 +82,13 @@ fn main() {
         }
         Err(_) => "ram".into(),
     };
-    let err = Command::new("/usr/bin/init")
+    let mut init = Command::new("/usr/bin/init");
+    // The marker exists only in the small bootstrap image. If we are still
+    // there, the requested rescue boot or failed root discovery needs BusyBox.
+    if Path::new(live::MARKER).exists() {
+        init.env("AFTERMATH_EARLY_RESCUE", "1");
+    }
+    let err = init
         .env("AFTERMATH_EARLY_DONE", "1")
         .env("AFTERMATH_ROOT", root)
         .exec();
@@ -104,6 +113,14 @@ enum Skip {
 }
 
 fn run() -> Result<String, Skip> {
+    if Path::new(live::MARKER).exists() {
+        return live::boot().map_err(Skip::Failed);
+    }
+    legacy_root().map(|dev| format!("overlay:{dev}"))
+}
+
+/// Support older all-in-RAM images and the existing session test fixture.
+fn legacy_root() -> Result<String, Skip> {
     let api = ApiMounts::mount();
     let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
     for arg in cmdline.split_whitespace() {

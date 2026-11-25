@@ -184,6 +184,9 @@ fn early_root() {
 }
 
 fn boot_mode() -> Mode {
+    if std::env::var_os("AFTERMATH_EARLY_RESCUE").is_some() {
+        return Mode::Busybox;
+    }
     let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
     let mut mode = Mode::Full;
     for arg in cmdline.split_whitespace() {
@@ -387,7 +390,9 @@ fn prepare_busybox_applets() {
 
 /// Mount every partition we can recognise read-only under /mnt/<name>.
 fn mount_data_read_only() {
-    const FSTYPES: &[&str] = &["ext4", "btrfs", "xfs", "vfat", "exfat", "ntfs3", "iso9660"];
+    const FSTYPES: &[&str] = &[
+        "ext4", "btrfs", "xfs", "vfat", "exfat", "ntfs3", "iso9660", "squashfs",
+    ];
     let Ok(rd) = fs::read_dir("/sys/class/block") else {
         return;
     };
