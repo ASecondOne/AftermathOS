@@ -156,7 +156,11 @@ fn main() {
     }
     network::wait_online();
     let mut shells = shells::Shells::default();
-    if !shells.start_all(mode_name, log_dir.clone()) {
+    if !shells.start_all(
+        mode_name,
+        log_dir.clone(),
+        aftermath_ctl::graphical::enabled_for_boot(&cmdline),
+    ) {
         warn("no usable shell (is /usr/bin/bash broken?) - exiting so PID 1 can fall back");
         std::process::exit(3);
     }
@@ -220,6 +224,9 @@ fn event_loop(
             }
         }
         registry.tick();
+        if let Some(reason) = registry.fallback_reason() {
+            shells.reveal_desktop_failure(&reason);
+        }
         match &jobs {
             Some(rx) => match rx.recv_timeout(Duration::from_millis(250)) {
                 Ok(job) => {

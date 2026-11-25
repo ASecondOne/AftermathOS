@@ -42,6 +42,10 @@ pub trait Subsystem {
     }
     /// Called about 4x a second (timers, delayed restarts).
     fn tick(&mut self) {}
+    /// A stopped graphical service may request visible console recovery.
+    fn fallback_reason(&self) -> Option<String> {
+        None
+    }
 }
 
 pub struct Job {
@@ -144,6 +148,12 @@ pub struct Registry {
 }
 
 impl Registry {
+    /// Query only in-memory subsystem state; no IPC or blocking child waits.
+    pub fn fallback_reason(&self) -> Option<String> {
+        self.subsystems
+            .iter()
+            .find_map(|subsystem| subsystem.fallback_reason())
+    }
     pub fn handle(&mut self, req: &Request, uid: u32) -> Response {
         // The engine-wide status: facts + every subsystem's summary.
         if req.subsystem == "system" && req.verb == "status" {

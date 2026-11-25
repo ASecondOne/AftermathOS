@@ -6,6 +6,8 @@ use serde::Deserialize;
 pub struct Settings {
     pub enabled: bool,
     pub development_accounts: bool,
+    /// Build local Plasma checkouts instead of using the distribution packages.
+    pub source_build: bool,
 }
 #[derive(Default, Deserialize)]
 #[serde(default)]
@@ -19,6 +21,19 @@ pub fn parse(text: &str) -> Result<Settings, String> {
 }
 pub fn settings() -> Result<Settings, String> {
     parse(&std::fs::read_to_string("/etc/aftermath/aftermath.toml").map_err(|e| e.to_string())?)
+}
+
+/// Keep graphical services and console allocation on the same boot policy.
+pub fn enabled_for_boot(cmdline: &str) -> bool {
+    settings().is_ok_and(|settings| settings.enabled)
+        && !cmdline.split_whitespace().any(|arg| {
+            matches!(
+                arg,
+                "aftermath.desktop=off"
+                    | "aftermath.test=session-smoke"
+                    | "aftermath.test=live-smoke"
+            )
+        })
 }
 
 #[cfg(test)]

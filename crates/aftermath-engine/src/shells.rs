@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -22,6 +23,8 @@ pub struct Shells {
     mode: String,
     log_dir: Option<PathBuf>,
     quick_deaths: u32,
+    desktop: bool,
+    fallback_revealed: bool,
 }
 
 struct Console {
@@ -31,14 +34,15 @@ struct Console {
 
 impl Shells {
     /// Start a shell on every console. False if none could be started.
-    pub fn start_all(&mut self, mode: &str, log_dir: Option<PathBuf>) -> bool {
+    pub fn start_all(&mut self, mode: &str, log_dir: Option<PathBuf>, desktop: bool) -> bool {
         self.mode = mode.to_owned();
         self.log_dir = log_dir;
+        self.desktop = desktop;
         let login_ttys = aftermath_ctl::sessions::login_ttys(Path::new("/")).unwrap_or_else(|e| {
             crate::warn(&format!("login terminal configuration: {e}"));
             Vec::new()
         });
-        for tty in active_consoles() {
+        for tty in console_plan(active_consoles(), desktop) {
             if login_ttys.contains(&tty) {
                 continue;
             }
@@ -47,11 +51,43 @@ impl Shells {
             }
         }
         for tty in login_ttys {
+            if desktop && tty == "tty1" {
+                continue;
+            }
             if let Some(pid) = spawn_login(&tty) {
                 self.by_pid.insert(pid, Console { tty, login: true });
             }
         }
         !self.by_pid.is_empty()
+    }
+
+    /// Once the greeter has stopped, restore visible Plan B on tty1.
+    pub fn reveal_desktop_failure(&mut self, reason: &str) {
+        if !self.desktop || self.fallback_revealed {
+            return;
+        }
+        self.fallback_revealed = true;
+        if let Some(pid) = spawn("tty1", &self.mode, self.log_dir.as_deref()) {
+            self.by_pid.insert(
+                pid,
+                Console {
+                    tty: "tty1".into(),
+                    login: false,
+                },
+            );
+        }
+        if let Ok(mut tty) = OpenOptions::new().read(true).write(true).open("/dev/tty1") {
+            // SAFETY: terminal ioctls take scalar KD_TEXT and VT-number values.
+            unsafe {
+                libc::ioctl(tty.as_raw_fd(), 0x4b3a, 0); // KDSETMODE, KD_TEXT
+                libc::ioctl(tty.as_raw_fd(), 0x5606, 1); // VT_ACTIVATE
+            }
+            let _ = writeln!(
+                tty,
+                "{RED}Desktop failed: {reason}. See `amctl logs desktop`.{RESET}"
+            );
+        }
+        crate::logs::desktop_event("visible console fallback opened on tty1");
     }
 
     /// A child exited: respawn it if it was a console shell (true).
@@ -78,6 +114,18 @@ impl Shells {
         }
         true
     }
+}
+
+/// Desktop boot keeps tty1 free and retains development access on tty3/serial.
+fn console_plan(active: Vec<String>, desktop: bool) -> Vec<String> {
+    let mut consoles = active;
+    if desktop {
+        consoles.retain(|tty| tty != "tty1" && tty != "console");
+        if !consoles.iter().any(|tty| tty == "tty3") {
+            consoles.push("tty3".into());
+        }
+    }
+    consoles
 }
 
 /// Never wrap login in the console recorder: authentication input must not
@@ -253,9 +301,23 @@ fn shell_command(log_file: Option<&Path>) -> Command {
 
 /// A temporary SquashFS upper layer is writable but does not save changes.
 fn root_note() -> String {
+    if let Ok(warning) = fs::read_to_string("/aftermath/image/boot-warning") {
+        return format!("{RED}WARNING: {warning}{RESET}\n");
+    }
     if aftermath_ctl::overlay::status()["persistent"] == true {
         format!("{PURPLE}Changes to the system are saved (host overlay disk).{RESET}\n")
     } else {
         format!("{RED}Temporary writable root: changes are lost at poweroff.{RESET}\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn desktop_reserves_tty1_and_keeps_serial_access() {
+        let active = vec!["tty1".into(), "ttyS0".into()];
+        assert_eq!(console_plan(active.clone(), true), vec!["ttyS0", "tty3"]);
+        assert_eq!(console_plan(active.clone(), false), active);
     }
 }

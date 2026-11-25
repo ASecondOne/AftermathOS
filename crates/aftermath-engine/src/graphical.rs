@@ -1,99 +1,28 @@
-//! Supervise standalone login1 and the graphical greeter. Desktop failures
-//! leave the development consoles and the rest of the engine running.
-use std::collections::VecDeque;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+//! Graphical boot orchestration. A failed or hung login screen releases tty1.
+//! Native PAM/elogind own authenticated sessions and their runtime directories.
+mod accounts;
+mod appearance;
+mod service;
+pub use accounts::system_accounts;
 
 use aftermath_ctl::graphical::Settings;
-use nix::sys::signal::{kill, Signal};
-use nix::sys::wait::WaitStatus;
-use nix::unistd::{chown, Gid, Pid, Uid, User};
+use nix::sys::{
+    signal::{kill, Signal},
+    wait::WaitStatus,
+};
+use nix::unistd::Pid;
 use serde_json::{json, Value};
+use service::Service;
+use std::collections::VecDeque;
+use std::fs;
+use std::os::unix::fs::MetadataExt;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 const LOGIN1: &str = "/usr/lib/elogind/elogind";
 const SDDM: &str = "/usr/bin/sddm";
 
-#[derive(Default)]
-struct Service {
-    pid: Option<i32>,
-    starts: VecDeque<Instant>,
-    restarts: u32,
-    stopping: Option<Instant>,
-}
-impl Service {
-    fn spawn(&mut self, program: &str, args: &[&str], log: &str) -> Result<(), String> {
-        let now = Instant::now();
-        self.starts
-            .retain(|at| now.duration_since(*at) < Duration::from_secs(30));
-        if self.starts.len() >= 3 {
-            return Err(format!(
-                "{program}: restart limit reached; consoles remain available"
-            ));
-        }
-        let out = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log)
-            .map_err(|e| e.to_string())?;
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .env_clear()
-            .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/bin")
-            .env("LANG", "C.UTF-8")
-            .env("SYSTEMD_LOG_TARGET", "console")
-            .env("ELOGIND_LOG_TARGET", "console")
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(out.try_clone().map_err(|e| e.to_string())?))
-            .stderr(Stdio::from(out));
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let child = command.spawn().map_err(|e| format!("{program}: {e}"))?;
-        if !self.starts.is_empty() {
-            self.restarts += 1;
-        }
-        self.starts.push_back(now);
-        self.pid = Some(child.id() as i32);
-        self.stopping = None;
-        Ok(())
-    }
-    fn stop(&mut self) {
-        if let Some(pid) = self.pid {
-            if self.stopping.is_none() {
-                let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
-                self.stopping = Some(Instant::now());
-            }
-            if self
-                .stopping
-                .is_some_and(|t| t.elapsed() > Duration::from_secs(3))
-            {
-                let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
-                let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
-            }
-        }
-    }
-    fn exited(&mut self, pid: i32) -> bool {
-        if self.pid == Some(pid) {
-            self.pid = None;
-            self.stopping = None;
-            true
-        } else {
-            false
-        }
-    }
-}
-
+/// All desktop timers run in the engine's nonblocking event loop.
 pub struct Graphical {
     config: Settings,
     state: &'static str,
@@ -105,26 +34,22 @@ pub struct Graphical {
     ready: bool,
     next_probe: Instant,
     provider_deadline: Option<Instant>,
+    boot_started: Instant,
+    no_display_since: Option<Instant>,
+    last_greeter: Option<u32>,
+    greeter_starts: VecDeque<Instant>,
+    force_failure: bool,
 }
 
 impl Graphical {
+    /// Apply the same desktop policy used by console allocation.
     pub fn new(cmdline: &str) -> Self {
-        let config = aftermath_ctl::graphical::settings().unwrap_or_default();
-        let disabled = !config.enabled
-            || cmdline.split_whitespace().any(|a| {
-                matches!(
-                    a,
-                    "aftermath.desktop=off"
-                        | "aftermath.test=session-smoke"
-                        | "aftermath.test=live-smoke"
-                )
-            });
         Self {
-            config,
-            state: if disabled {
-                "disabled"
-            } else {
+            config: aftermath_ctl::graphical::settings().unwrap_or_default(),
+            state: if aftermath_ctl::graphical::enabled_for_boot(cmdline) {
                 "waiting-for-foundations"
+            } else {
+                "disabled"
             },
             error: None,
             prepared: false,
@@ -134,18 +59,50 @@ impl Graphical {
             ready: false,
             next_probe: Instant::now(),
             provider_deadline: None,
+            boot_started: Instant::now(),
+            no_display_since: None,
+            last_greeter: None,
+            greeter_starts: VecDeque::new(),
+            force_failure: cmdline
+                .split_whitespace()
+                .any(|arg| arg == "aftermath.test=desktop-fail"),
         }
     }
+
+    /// Describe process health without equating a daemon PID with a visible UI.
     pub fn status(&self) -> Value {
-        json!({"state": self.state, "error": self.error, "login1": {"provider": LOGIN1, "pid": self.login1.pid, "responding": self.ready, "restarts": self.login1.restarts},
-            "display_manager": {"provider": SDDM, "pid": self.greeter.pid, "restarts": self.greeter.restarts}, "session": "Plasma Wayland", "user_bus": "dbus-run-session per graphical session", "log": "/run/aftermath/sddm.log"})
+        json!({
+            "state": self.state,
+            "error": self.error,
+            "login1": { "provider": LOGIN1, "pid": self.login1.pid,
+                "responding": self.ready, "restarts": self.login1.restarts },
+            "display_manager": { "provider": SDDM, "pid": self.greeter.pid,
+                "restarts": self.greeter.restarts, "protocol": "wayland" },
+            "session": "Plasma Wayland",
+            "user_bus": "dbus-run-session per graphical session",
+            "log": "/run/aftermath/sddm.log"
+        })
     }
+
+    /// Reveal fallback only after the display manager has released its devices.
+    pub fn fallback_reason(&self) -> Option<&str> {
+        if self.state == "failed" && self.greeter.pid.is_none() {
+            self.error.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// Fail once; reaping a stopped child must not revive a failed desktop.
     fn fail(&mut self, error: String) {
         crate::warn(&format!("graphical boot: {error}"));
+        crate::logs::desktop_event(&format!("desktop failed: {error}"));
         self.error = Some(error);
         self.state = "failed";
         self.greeter.stop();
     }
+
+    /// Bound foundation, provider and greeter startup independently.
     pub fn advance(&mut self, foundations: bool) {
         if self.state == "disabled" {
             return;
@@ -156,29 +113,55 @@ impl Graphical {
         }
         if !foundations {
             self.greeter.stop();
+            if self.boot_started.elapsed() > Duration::from_secs(45) {
+                self.fail("device discovery or system D-Bus never became ready".into());
+            }
+            return;
+        }
+        if self.force_failure {
+            self.fail("requested private desktop failure test".into());
             return;
         }
         if !self.prepared {
-            if let Err(e) = prepare(&self.config) {
-                self.fail(e);
+            if let Err(error) =
+                accounts::prepare(&self.config).and_then(|_| appearance::prepare(&self.config))
+            {
+                self.fail(error);
                 return;
             }
             self.prepared = true;
         }
         if self.login1.pid.is_none() && !self.ready {
-            if let Err(e) = self.login1.spawn(LOGIN1, &[], "/run/aftermath/elogind.log") {
-                self.fail(e);
+            if let Err(error) = self.login1.spawn(LOGIN1, "/run/aftermath/elogind.log") {
+                self.fail(error);
                 return;
             }
             self.provider_deadline = Some(Instant::now() + Duration::from_secs(15));
             self.state = "starting-login1";
         }
+        if let Err(error) = self.advance_probe() {
+            self.fail(error);
+            return;
+        }
+        if !self.ready {
+            self.greeter.stop();
+            if self.provider_deadline.is_some_and(|at| Instant::now() > at) {
+                self.login1.stop();
+            }
+            return;
+        }
+        self.provider_deadline = None;
+        self.advance_greeter();
+    }
+
+    /// Ask the actual system bus for login1 ownership using a bounded child.
+    fn advance_probe(&mut self) -> Result<(), String> {
         if let Some((pid, deadline)) = self.probe {
             if Instant::now() > deadline {
                 let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
             }
         } else if Instant::now() >= self.next_probe {
-            match Command::new("/usr/bin/dbus-send")
+            let child = Command::new("/usr/bin/dbus-send")
                 .args([
                     "--system",
                     "--print-reply",
@@ -192,52 +175,57 @@ impl Graphical {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-            {
-                Ok(child) => {
-                    self.probe = Some((child.id() as i32, Instant::now() + Duration::from_secs(2)))
-                }
-                Err(e) => {
-                    self.fail(e.to_string());
+                .map_err(|error| error.to_string())?;
+            self.probe = Some((child.id() as i32, Instant::now() + Duration::from_secs(2)));
+        }
+        Ok(())
+    }
+
+    /// Detect missing UI and fast greeter crashes even while SDDM itself lives.
+    fn advance_greeter(&mut self) {
+        if self.greeter.pid.is_none() {
+            if let Err(error) = self.greeter.spawn(SDDM, "/run/aftermath/sddm.log") {
+                self.fail(error);
+                return;
+            }
+            self.state = "starting-greeter";
+            self.no_display_since = Some(Instant::now());
+            crate::logs::desktop_event("SDDM starting with a Wayland greeter");
+            return;
+        }
+        let (greeter, session) = display_processes();
+        if session {
+            self.greeter_starts.clear();
+        }
+        if let Some(pid) = greeter {
+            if self.last_greeter != Some(pid) {
+                let now = Instant::now();
+                self.greeter_starts
+                    .retain(|at| now.duration_since(*at) < Duration::from_secs(30));
+                self.greeter_starts.push_back(now);
+                self.last_greeter = Some(pid);
+                if self.greeter_starts.len() > 6 {
+                    self.fail("greeter repeatedly crashed inside SDDM".into());
                     return;
                 }
             }
         }
-        if !self.ready {
-            self.greeter.stop();
-            if self.provider_deadline.is_some_and(|at| Instant::now() > at) {
-                self.login1.stop();
-            }
-            return;
-        }
-        self.provider_deadline = None;
-        if self.greeter.pid.is_none() {
-            match self.greeter.spawn(SDDM, &[], "/run/aftermath/sddm.log") {
-                Ok(()) => {
-                    self.state = "starting-greeter";
-                    crate::log("graphical login started: SDDM with Plasma Wayland");
-                }
-                Err(e) => self.fail(e),
-            }
-        } else if self.state == "starting-greeter"
-            && fs::read_dir("/proc")
-                .into_iter()
-                .flatten()
-                .flatten()
-                .any(|entry| {
-                    fs::read_link(entry.path().join("exe"))
-                        .ok()
-                        .and_then(|p| {
-                            p.file_name()
-                                .map(|n| n.to_string_lossy().starts_with("sddm-greeter"))
-                        })
-                        .unwrap_or(false)
-                })
-        {
+        if greeter.is_some() || session {
             self.state = "running";
+            self.no_display_since = None;
+        } else if self
+            .no_display_since
+            .get_or_insert_with(Instant::now)
+            .elapsed()
+            > Duration::from_secs(35)
+        {
+            self.fail("SDDM has no greeter or graphical session after 35 seconds".into());
         }
     }
+
+    /// Central reaping reports probe results and supervised daemon exits here.
     pub fn child_exited(&mut self, pid: i32, status: &WaitStatus) -> bool {
-        if self.probe.is_some_and(|(p, _)| p == pid) {
+        if self.probe.is_some_and(|(owned, _)| owned == pid) {
             self.probe = None;
             self.ready = matches!(status, WaitStatus::Exited(_, 0));
             self.next_probe = Instant::now()
@@ -251,132 +239,69 @@ impl Graphical {
         if self.login1.exited(pid) {
             self.ready = false;
             self.greeter.stop();
-            self.state = "restarting-login1";
+            if self.state != "failed" {
+                self.state = "restarting-login1";
+            }
             return true;
         }
         if self.greeter.exited(pid) {
-            self.state = "restarting-greeter";
+            if self.state != "failed" {
+                self.state = "restarting-greeter";
+            }
             return true;
         }
         false
     }
 }
 
-fn native(program: &str, args: &[&str]) -> Result<(), String> {
-    let output = Command::new(program)
-        .args(args)
-        .env_clear()
-        .env("PATH", "/usr/bin")
-        .output()
-        .map_err(|e| e.to_string())?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{program}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    }
-}
-
-fn prepare(config: &Settings) -> Result<(), String> {
-    aftermath_ctl::users::require_aftermath()?;
-    if !Path::new(LOGIN1).is_file() || !Path::new(SDDM).is_file() {
-        return Err("elogind or SDDM is missing; rebuild the desktop image".into());
-    }
-    if User::from_name("sddm")
-        .map_err(|e| e.to_string())?
-        .is_none()
-    {
-        native(
-            "/usr/bin/useradd",
-            &[
-                "--system",
-                "--user-group",
-                "--home-dir",
-                "/var/lib/sddm",
-                "--shell",
-                "/usr/bin/nologin",
-                "--",
-                "sddm",
-            ],
-        )?;
-    }
-    let sddm = User::from_name("sddm")
-        .map_err(|e| e.to_string())?
-        .ok_or("no SDDM service account")?;
-    for path in ["/var/lib/sddm", "/var/lib/sddm/.config"] {
-        fs::create_dir_all(path).map_err(|e| e.to_string())?;
-        chown(path, Some(sddm.uid), Some(sddm.gid)).map_err(|e| e.to_string())?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o750)).map_err(|e| e.to_string())?;
-    }
-    fs::create_dir_all("/usr/share/aftermath/xsessions").map_err(|e| e.to_string())?;
-    if config.development_accounts && !Path::new("/etc/aftermath/desktop-seeded").exists() {
-        if User::from_name("bob").map_err(|e| e.to_string())?.is_none() {
-            crate::users::add("bob")?;
+/// Greeter disappearance during user login is healthy while KWin/Plasma runs.
+fn display_processes() -> (Option<u32>, bool) {
+    let mut greeter = None;
+    let mut session = false;
+    for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Ok(executable) = fs::read_link(entry.path().join("exe")) else {
+            continue;
+        };
+        let name = executable
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if name.starts_with("sddm-greeter") {
+            greeter = entry.file_name().to_string_lossy().parse().ok();
         }
-        let bob = User::from_name("bob")
-            .map_err(|e| e.to_string())?
-            .ok_or("no Bob account")?;
-        if !aftermath_ctl::users::regular(bob.uid.as_raw())
-            || bob.gid == Gid::from_raw(0)
-            || bob.uid == Uid::from_raw(0)
+        if matches!(name, "kwin_wayland" | "plasmashell")
+            && entry
+                .metadata()
+                .is_ok_and(|metadata| metadata.uid() >= 1000)
         {
-            return Err("bob must be a regular unprivileged account".into());
+            session = true;
         }
-        // Explicit temporary development defaults requested by the user. Secrets
-        // go only to chpasswd's private stdin, never logs, arguments or IPC.
-        let mut command = Command::new("/usr/bin/chpasswd")
-            .env_clear()
-            .env("PATH", "/usr/bin")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        let result = command
-            .stdin
-            .take()
-            .ok_or("no password tool input")?
-            .write_all(b"bob:bob\nroot:bob\n");
-        let status = command.wait().map_err(|e| e.to_string())?;
-        result.map_err(|e| e.to_string())?;
-        if !status.success() {
-            return Err("temporary account password initialization failed".into());
-        }
-        fs::write(
-            "/etc/aftermath/desktop-seeded",
-            "development accounts initialized once\n",
-        )
-        .map_err(|e| e.to_string())?;
-        crate::log("initialized temporary development accounts: bob and root");
     }
-    Ok(())
+    (greeter, session)
 }
 
-pub fn system_accounts() {
-    if aftermath_ctl::graphical::settings().is_ok_and(|c| c.enabled)
-        && aftermath_ctl::users::require_aftermath().is_ok()
-        && Path::new("/usr/bin/systemd-sysusers").is_file()
-    {
-        if let Err(error) = native("/usr/bin/systemd-sysusers", &[]) {
-            crate::warn(&format!("system accounts: {error}"));
-        }
-        // Arch's dbus package normally applies this in its installation hook.
-        // Also do it here for the private, unprivileged integration image.
-        let helper = Path::new("/usr/lib/dbus-daemon-launch-helper");
-        if fs::symlink_metadata(helper).is_ok_and(|m| m.is_file()) {
-            if let Ok(Some(dbus)) = User::from_name("dbus") {
-                let result = chown(helper, Some(Uid::from_raw(0)), Some(dbus.gid))
-                    .map_err(|e| e.to_string())
-                    .and_then(|_| {
-                        fs::set_permissions(helper, fs::Permissions::from_mode(0o4750))
-                            .map_err(|e| e.to_string())
-                    });
-                if let Err(error) = result {
-                    crate::warn(&format!("D-Bus activation helper: {error}"));
-                }
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn reaping_a_stopped_greeter_preserves_failed_state_and_fallback() {
+        let root =
+            std::env::temp_dir().join(format!("aftermath-greeter-reap-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let daemon = root.join("daemon");
+        crate::test_support::install(&daemon);
+        let mut graphical = Graphical::new("aftermath.desktop=off");
+        graphical.state = "running";
+        graphical
+            .greeter
+            .spawn(daemon.to_str().unwrap(), root.join("log").to_str().unwrap())
+            .unwrap();
+        let pid = graphical.greeter.pid.unwrap();
+        graphical.fail("test failure".into());
+        let status = nix::sys::wait::waitpid(Pid::from_raw(pid), None).unwrap();
+        assert!(graphical.child_exited(pid, &status));
+        assert_eq!(graphical.state, "failed");
+        assert_eq!(graphical.fallback_reason(), Some("test failure"));
+        fs::remove_dir_all(root).unwrap();
     }
 }

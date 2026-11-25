@@ -87,6 +87,9 @@ impl Subsystem for Desktop {
         self.graphical
             .advance(self.devices.state == "running" && self.bus.status()["responding"] == true);
     }
+    fn fallback_reason(&self) -> Option<String> {
+        self.graphical.fallback_reason().map(str::to_owned)
+    }
     fn child_exited(&mut self, pid: i32, status: &WaitStatus) -> bool {
         self.bus.child_exited(pid, status)
             || self.devices.child_exited(pid, status)

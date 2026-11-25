@@ -1,5 +1,5 @@
-//! Authenticated PAM sessions and shared per-user XDG runtime directories.
-//! This is not login1 and grants no DRM/input device control.
+//! Register authenticated PAM sessions and track their runtime-directory owner.
+//! Aftermath owns fallback runtimes; elogind owns native seat/session runtimes.
 
 use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder, OpenOptions};
@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use crate::control::Subsystem;
 
 #[derive(Clone)]
+/// One authenticated session and the process identity used to detect logout.
 struct Session {
     id: String,
     user: String,
@@ -27,6 +28,7 @@ struct Session {
     provider: &'static str,
 }
 #[derive(Clone, Copy)]
+/// Device/inode ownership prevents cleanup from following a replaced directory.
 struct Runtime {
     uid: u32,
     dev: u64,
@@ -34,6 +36,7 @@ struct Runtime {
     external: bool,
 }
 
+/// Session registry, runtime lifetimes and asynchronous fallback cleanup.
 pub struct Sessions {
     sessions: BTreeMap<String, Session>,
     runtimes: BTreeMap<u32, Runtime>,
@@ -45,6 +48,51 @@ pub struct Sessions {
     errors: Vec<String>,
 }
 
+/// Validated fields published by the native login1 provider.
+struct Login1Record {
+    kind: String,
+    tty: String,
+    seat: Option<String>,
+    vt: Option<String>,
+}
+impl Login1Record {
+    /// Accept only a safe record belonging to the authenticated account.
+    fn load(id: &str, uid: u32, tty: &str) -> Result<Self, String> {
+        if id.is_empty()
+            || id.len() > 64
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err("invalid login1 session ID".into());
+        }
+        let path = Path::new("/run/systemd/sessions").join(id);
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|_| "elogind did not publish the PAM session")?;
+        if !metadata.is_file() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            return Err("unsafe login1 session record".into());
+        }
+        let record = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        let field = |key: &str| record.lines().find_map(|line| line.strip_prefix(key));
+        if field("UID=").and_then(|value| value.parse::<u32>().ok()) != Some(uid) {
+            return Err("login1 session belongs to a different account".into());
+        }
+        let kind = field("TYPE=").unwrap_or("tty");
+        if !matches!(kind, "tty" | "x11" | "wayland" | "unspecified") {
+            return Err("unsupported login1 session type".into());
+        }
+        Ok(Self {
+            kind: kind.into(),
+            tty: normalize_tty(tty)
+                .or_else(|| field("TTY=").and_then(normalize_tty))
+                .unwrap_or_default(),
+            seat: field("SEAT=").map(str::to_owned),
+            vt: field("VTNR=").map(str::to_owned),
+        })
+    }
+}
+
+/// Distinguish a live process from a reused PID or zombie.
 fn process_stamp(pid: u32) -> Option<u64> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let fields: Vec<_> = stat.rsplit_once(')')?.1.split_whitespace().collect();
@@ -54,6 +102,7 @@ fn process_stamp(pid: u32) -> Option<u64> {
     fields.get(19)?.parse().ok()
 }
 
+/// Refuse untrusted/symlink parents before creating runtime ownership records.
 fn secure_parent(path: &Path, uid: u32, mode: u32) -> Result<(), String> {
     match DirBuilder::new().mode(mode).create(path) {
         Ok(()) => {}
@@ -72,9 +121,11 @@ fn secure_parent(path: &Path, uid: u32, mode: u32) -> Result<(), String> {
 }
 
 impl Sessions {
+    /// The engine manages fallback sessions below /run without a systemd manager.
     pub fn new() -> Self {
         Self::at("/run/user".into(), "/run/aftermath/sessions".into(), 0)
     }
+    /// Alternate private roots support unprivileged lifecycle tests.
     fn at(users_dir: PathBuf, records: PathBuf, manager_uid: u32) -> Self {
         Self {
             sessions: BTreeMap::new(),
@@ -87,9 +138,11 @@ impl Sessions {
             errors: Vec::new(),
         }
     }
+    /// Each fallback runtime has a private ownership record.
     fn record_path(&self, uid: u32) -> PathBuf {
         self.records.join(format!("{uid}.json"))
     }
+    /// Check the exact directory identity before reusing or retiring it.
     fn validate_runtime(&self, r: Runtime) -> Result<PathBuf, String> {
         let path = self.users_dir.join(r.uid.to_string());
         let m = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
@@ -101,6 +154,7 @@ impl Sessions {
         }
         Ok(path)
     }
+    /// Retire only Aftermath-owned runtimes; external providers do their cleanup.
     fn retire(&mut self, r: Runtime) -> Result<(), String> {
         // elogind owns the lifetime and revocable device access of its sessions.
         // Never rename/delete a runtime directory belonging to that provider.
@@ -126,6 +180,7 @@ impl Sessions {
         self.cleanup.push(worker);
         Ok(())
     }
+    /// Recover a recorded stale runtime while protecting a live manager's files.
     fn stale_runtime(&mut self, uid: u32) -> Result<(), String> {
         let text = fs::read_to_string(self.record_path(uid)).map_err(|_| format!("/run/user/{uid} exists without an Aftermath ownership record; refusing to adopt or delete it"))?;
         let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
@@ -149,6 +204,7 @@ impl Sessions {
             external: false,
         })
     }
+    /// Share one private fallback runtime until the last session closes.
     fn runtime(&mut self, uid: u32, gid: u32) -> Result<PathBuf, String> {
         secure_parent(&self.users_dir, self.manager_uid, 0o755)?;
         secure_parent(&self.records, self.manager_uid, 0o700)?;
@@ -187,7 +243,11 @@ impl Sessions {
                 .mode(0o600)
                 .open(&temp)
                 .map_err(|e| e.to_string())?;
-            let record = json!({"uid": uid, "dev": r.dev, "ino": r.ino, "owner_pid": std::process::id(), "owner_stamp": process_stamp(std::process::id()).ok_or("cannot identify session manager")?});
+            let record = json!({
+                "uid": uid, "dev": r.dev, "ino": r.ino,
+                "owner_pid": std::process::id(),
+                "owner_stamp": process_stamp(std::process::id()).ok_or("cannot identify session manager")?
+            });
             writeln!(file, "{record}").map_err(|e| e.to_string())?;
             fs::rename(&temp, self.record_path(uid)).map_err(|e| e.to_string())?;
             self.runtimes.insert(uid, r);
@@ -198,6 +258,7 @@ impl Sessions {
         }
         result
     }
+    /// Register an authenticated login using the engine-owned runtime policy.
     fn open(
         &mut self,
         user: String,
@@ -227,7 +288,10 @@ impl Sessions {
         let id = format!("c{}", self.next_id);
         let runtime = self.runtime(uid, gid)?;
         self.next_id = next;
-        let mut env = json!({"XDG_RUNTIME_DIR": runtime, "XDG_SESSION_ID": id, "XDG_SESSION_TYPE": "tty", "XDG_SESSION_CLASS": "user"});
+        let mut env = json!({
+            "XDG_RUNTIME_DIR": runtime, "XDG_SESSION_ID": id,
+            "XDG_SESSION_TYPE": "tty", "XDG_SESSION_CLASS": "user"
+        });
         let mode = aftermath_ctl::facts::mode();
         env["AFTERMATH_MODE"] = json!(mode);
         if mode == "full" {
@@ -257,6 +321,7 @@ impl Sessions {
         crate::log(&format!("PAM session {id} opened for uid {uid}"));
         Ok(json!({"id": id, "uid": uid, "runtime_dir": runtime, "environment": env}))
     }
+    /// Register a published login1 session without taking over its runtime.
     fn open_elogind(
         &mut self,
         user: &str,
@@ -264,14 +329,6 @@ impl Sessions {
         tty: &str,
         native_id: &str,
     ) -> Result<Value, String> {
-        if native_id.is_empty()
-            || native_id.len() > 64
-            || !native_id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-        {
-            return Err("invalid login1 session ID".into());
-        }
         let account = User::from_name(user)
             .map_err(|e| e.to_string())?
             .ok_or("unknown account")?;
@@ -281,24 +338,7 @@ impl Sessions {
             return Err("invalid PAM leader".into());
         }
         let stamp = process_stamp(leader).ok_or("PAM leader is not alive")?;
-        let path = Path::new("/run/systemd/sessions").join(native_id);
-        let meta =
-            fs::symlink_metadata(&path).map_err(|_| "elogind did not publish the PAM session")?;
-        if !meta.is_file() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
-            return Err("unsafe login1 session record".into());
-        }
-        let record = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let field = |key: &str| record.lines().find_map(|l| l.strip_prefix(key));
-        if field("UID=").and_then(|s| s.parse::<u32>().ok()) != Some(uid) {
-            return Err("login1 session belongs to a different account".into());
-        }
-        let kind = field("TYPE=").unwrap_or("tty");
-        if !matches!(kind, "tty" | "x11" | "wayland" | "unspecified") {
-            return Err("unsupported login1 session type".into());
-        }
-        let tty = normalize_tty(tty)
-            .or_else(|| field("TTY=").and_then(normalize_tty))
-            .unwrap_or_default();
+        let record = Login1Record::load(native_id, uid, tty)?;
         let runtime = self.users_dir.join(uid.to_string());
         let m = fs::symlink_metadata(&runtime)
             .map_err(|e| format!("elogind runtime directory: {e}"))?;
@@ -321,11 +361,15 @@ impl Sessions {
                 external: true,
             },
         );
-        let mut env = json!({"XDG_RUNTIME_DIR": runtime, "XDG_SESSION_ID": native_id, "XDG_SESSION_TYPE": kind, "XDG_SESSION_CLASS": "user", "AFTERMATH_MODE": aftermath_ctl::facts::mode()});
-        if let Some(seat) = field("SEAT=") {
+        let mut env = json!({
+            "XDG_RUNTIME_DIR": runtime, "XDG_SESSION_ID": native_id,
+            "XDG_SESSION_TYPE": record.kind, "XDG_SESSION_CLASS": "user",
+            "AFTERMATH_MODE": aftermath_ctl::facts::mode()
+        });
+        if let Some(seat) = &record.seat {
             env["XDG_SEAT"] = json!(seat);
         }
-        if let Some(vt) = field("VTNR=") {
+        if let Some(vt) = &record.vt {
             env["XDG_VTNR"] = json!(vt);
         }
         if aftermath_ctl::facts::mode() == "full" {
@@ -341,18 +385,20 @@ impl Sessions {
                 user: user.into(),
                 uid,
                 gid: account.gid.as_raw(),
-                tty,
+                tty: record.tty,
                 leader,
                 stamp,
-                kind: kind.into(),
+                kind: record.kind.clone(),
                 provider: "elogind",
             },
         );
         crate::log(&format!(
-            "PAM session {id} registered for uid {uid} ({kind})"
+            "PAM session {id} registered for uid {uid} ({})",
+            record.kind
         ));
         Ok(json!({"id": id, "uid": uid, "runtime_dir": runtime, "environment": env}))
     }
+    /// Close one registration and retire fallback storage after the last logout.
     fn close(&mut self, id: &str) -> Result<Value, String> {
         if let Some(s) = self.sessions.remove(id) {
             if !self.sessions.values().any(|other| other.uid == s.uid) {
@@ -364,6 +410,7 @@ impl Sessions {
         }
         Ok(json!({"id": id, "closed": true}))
     }
+    /// Poll cleanup workers without blocking session registration or logout.
     fn collect_cleanup(&mut self) {
         let mut i = 0;
         while i < self.cleanup.len() {
@@ -400,10 +447,27 @@ impl Subsystem for Sessions {
     fn call(&mut self, verb: &str, args: &[String]) -> Result<Value, String> {
         match (verb, args) {
             ("list", []) => {
-                let sessions: Vec<_> = self.sessions.values().map(|s| json!({"id": s.id, "user": s.user, "uid": s.uid, "gid": s.gid, "tty": s.tty, "leader": s.leader, "type": s.kind, "provider": s.provider, "runtime_dir": self.users_dir.join(s.uid.to_string()), "seat_control": s.provider == "elogind"})).collect();
-                Ok(
-                    json!({"sessions": sessions, "cleanup_pending": self.cleanup.len(), "cleanup_errors": self.errors, "login1": self.sessions.values().any(|s| s.provider == "elogind"), "user_bus": "dbus-run-session for graphical sessions"}),
-                )
+                let sessions: Vec<_> = self
+                    .sessions
+                    .values()
+                    .map(|session| {
+                        json!({
+                            "id": session.id, "user": session.user,
+                            "uid": session.uid, "gid": session.gid,
+                            "tty": session.tty, "leader": session.leader,
+                            "type": session.kind, "provider": session.provider,
+                            "runtime_dir": self.users_dir.join(session.uid.to_string()),
+                            "seat_control": session.provider == "elogind"
+                        })
+                    })
+                    .collect();
+                Ok(json!({
+                    "sessions": sessions,
+                    "cleanup_pending": self.cleanup.len(),
+                    "cleanup_errors": self.errors,
+                    "login1": self.sessions.values().any(|session| session.provider == "elogind"),
+                    "user_bus": "dbus-run-session for graphical sessions"
+                }))
             }
             ("open", [user, pid, tty]) => {
                 let account = User::from_name(user)
@@ -444,9 +508,12 @@ impl Subsystem for Sessions {
         self.collect_cleanup();
     }
     fn summary(&self) -> Option<Value> {
-        Some(
-            json!({"active": self.sessions.len(), "users": self.runtimes.len(), "login1": self.sessions.values().any(|s| s.provider == "elogind"), "user_bus": "graphical session scoped"}),
-        )
+        Some(json!({
+            "active": self.sessions.len(),
+            "users": self.runtimes.len(),
+            "login1": self.sessions.values().any(|session| session.provider == "elogind"),
+            "user_bus": "graphical session scoped"
+        }))
     }
 }
 

@@ -266,6 +266,10 @@ pub fn write_grubenv(path: &Path, extra: &[(String, String)]) -> Result<()> {
 
 pub fn grub_cfg() -> String {
     let normal = "console=ttyS0,115200 console=tty0 loglevel=4";
+    // Default desktop boot: no logo, no blinking cursor, no boot chatter before
+    // SDDM. `loglevel=4` keeps engine warnings (level 3) visible on tty1.
+    let desktop = "console=ttyS0,115200 console=tty0 quiet loglevel=4 \
+                   vt.global_cursor_default=0 logo.nologo";
     let serial = "console=tty0 console=ttyS0,115200";
     let debug = "console=tty0 console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 \
                  ignore_loglevel loglevel=8";
@@ -361,8 +365,9 @@ else
 fi
 
 menuentry "Aftermath OS" --id aftermath --class aftermath {{
+    set gfxpayload=keep
     echo "Loading Aftermath {VERSION} ..."
-    if linux /boot/vmlinuz-aftermath {CMDLINE_BASE} {normal} ${{aftermath_args}}; then
+    if linux /boot/vmlinuz-aftermath {CMDLINE_BASE} {desktop} ${{aftermath_args}}; then
         if initrd /boot/initramfs-aftermath.img; then
             aftermath_boot_attempt
             boot
@@ -780,6 +785,41 @@ mod tests {
             let at = cfg.find(id).unwrap();
             let entry = &cfg[at..at + cfg[at..].find('}').unwrap()];
             assert!(!entry.contains("aftermath_boot_attempt"));
+        }
+    }
+
+    /// The `linux` line of the menu entry with this GRUB id.
+    fn linux_line<'a>(cfg: &'a str, id: &str) -> &'a str {
+        let entry = &cfg[cfg.find(&format!("--id {id} ")).unwrap()..];
+        let line = &entry[entry.find("if linux ").unwrap()..];
+        &line[..line.find('\n').unwrap()]
+    }
+
+    #[test]
+    fn only_the_default_entry_boots_quietly() {
+        let cfg = grub_cfg();
+
+        let default = linux_line(&cfg, "aftermath");
+        assert_eq!(default.matches("loglevel=").count(), 1, "{default}");
+        for arg in [
+            "quiet",
+            "loglevel=4",
+            "vt.global_cursor_default=0",
+            "logo.nologo",
+        ] {
+            assert!(
+                default.split_whitespace().any(|a| a == arg),
+                "{arg}: {default}"
+            );
+        }
+
+        // Recovery entries keep every message and the cursor visible.
+        for id in ["aftermath-console", "aftermath-host", "aftermath-busybox"] {
+            let line = linux_line(&cfg, id);
+            assert!(
+                !line.contains("quiet") && !line.contains("nologo"),
+                "{line}"
+            );
         }
     }
 }
