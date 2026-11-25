@@ -70,6 +70,9 @@ pub struct ResetArgs {
     /// Build the reset VM without opening its QEMU window afterwards.
     #[arg(long)]
     pub no_run: bool,
+    /// Also erase the separate guest-partitionable disk (kept by default).
+    #[arg(long)]
+    pub wipe_disk: bool,
 }
 
 pub fn reset_vm(ctx: &Ctx, a: &ResetArgs) -> Result<()> {
@@ -80,8 +83,12 @@ pub fn reset_vm(ctx: &Ctx, a: &ResetArgs) -> Result<()> {
         ctx.host_overlay_image().display()
     );
     println!(
-        "  - delete VM state: {}/OVMF_VARS.4m.fd, {}/disk.qcow2",
-        vm.display(),
+        "  - delete VM firmware state: {}/OVMF_VARS.4m.fd",
+        vm.display()
+    );
+    println!(
+        "  - {} the separate guest disk {}/disk.qcow2",
+        if a.wipe_disk { "erase" } else { "keep" },
         vm.display()
     );
     if a.logs {
@@ -127,7 +134,9 @@ pub fn reset_vm(ctx: &Ctx, a: &ResetArgs) -> Result<()> {
     // 2. VM state.
     ctx.remove(&ctx.host_overlay_image())?;
     ctx.remove(&vm.join("OVMF_VARS.4m.fd"))?;
-    ctx.remove(&vm.join("disk.qcow2"))?;
+    if a.wipe_disk {
+        ctx.remove(&vm.join("disk.qcow2"))?;
+    }
     if a.logs {
         ctx.remove(&vm.join("logs"))?;
         ctx.remove(&vm.join("serial.log"))?;

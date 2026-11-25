@@ -60,10 +60,15 @@ pub struct RunArgs {
     /// Disable KVM even if /dev/kvm is usable (slow software emulation).
     #[arg(long)]
     pub no_kvm: bool,
-    /// Attach a persistent virtio disk out/vm/disk.qcow2 of this size
-    /// (created on first use), e.g. `--disk 20G`.
-    #[arg(long, value_name = "SIZE")]
+    /// Guest-partitionable disk capacity (default 32G; existing disks only grow).
+    #[arg(long, value_name = "SIZE", conflicts_with = "no_disk")]
     pub disk: Option<String>,
+    /// Boot without the separate guest-partitionable disk.
+    #[arg(long)]
+    pub no_disk: bool,
+    /// Host audio backend; auto uses PipeWire/PulseAudio when available.
+    #[arg(long, default_value = "auto", value_parser = ["auto", "none", "pipewire", "pa", "alsa"])]
+    pub audio_driver: String,
     /// Don't attach the strata disk out/strata.img (boots in Arch host mode).
     #[arg(long)]
     pub no_strata: bool,
@@ -192,16 +197,19 @@ pub fn run(ctx: &Ctx, a: &RunArgs) -> Result<()> {
         q.args(["-device", "virtio-blk-pci,drive=bootdisk,bootindex=0"]);
     }
 
-    if let Some(size) = &a.disk {
-        let disk = vm.join("disk.qcow2");
-        if !disk.exists() {
-            let mut c = Command::new("qemu-img");
-            c.args(["create", "-f", "qcow2"]).arg(&disk).arg(size);
-            ctx.run(&mut c)?;
-        }
-        q.arg("-drive")
-            .arg(format!("file={},if=virtio,format=qcow2", disk.display()));
+    if !a.no_disk {
+        let disk = crate::vm_disk::ensure(
+            ctx,
+            a.disk.as_deref().unwrap_or(crate::vm_disk::DEFAULT_SIZE),
+        )?;
+        crate::vm_disk::attach(&mut q, &disk);
     }
+    let audio = if a.audio_driver == "auto" {
+        crate::vm_disk::host_audio()
+    } else {
+        &a.audio_driver
+    };
+    crate::vm_disk::audio(&mut q, audio);
 
     // Host overlay disk: makes the host root persistent (aftermath-early).
     if a.no_overlay {

@@ -85,7 +85,9 @@ pub fn build(ctx: &Ctx, a: &KernelArgs) -> Result<()> {
     let bz = build.join("arch/x86/boot/bzImage");
     println!("==> cp {} {}", bz.display(), image.display());
     if !ctx.dry_run {
-        std::fs::copy(&bz, &image).with_context(|| format!("copy {}", bz.display()))?;
+        let temporary = image.with_extension("partial");
+        std::fs::copy(&bz, &temporary).with_context(|| format!("copy {}", bz.display()))?;
+        std::fs::rename(temporary, &image)?;
     }
 
     let mods = ctx.kernel_modules();

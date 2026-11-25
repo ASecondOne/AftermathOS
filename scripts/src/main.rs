@@ -19,6 +19,7 @@ mod plasma;
 mod qemu;
 mod session_smoke;
 mod stratum;
+mod vm_disk;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -51,6 +52,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Create or grow the persistent, guest-partitionable virtual disk
+    Disk {
+        #[arg(long, default_value = vm_disk::DEFAULT_SIZE)]
+        size: String,
+    },
     /// Verify SquashFS persistence, rescue and GRUB counting on private VM disks
     SmokeLive {
         /// Test legacy BIOS instead of UEFI/OVMF
@@ -122,6 +128,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let ctx = Ctx::new(cli.dry_run)?;
     match cli.cmd {
+        Cmd::Disk { size } => vm_disk::ensure(&ctx, &size).map(|_| ()),
         Cmd::SmokeLive { bios } => live_smoke::run(&ctx, bios),
         Cmd::SmokeDesktop { grub, bios } => desktop_smoke::run(&ctx, grub, bios),
         Cmd::Plasma => plasma::build(&ctx).map(|_| ()),
