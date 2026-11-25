@@ -1,17 +1,16 @@
-//! aftermath-early: the persistent host root, set up before PID 1 proper.
+//! aftermath-early: mount the live root before normal PID 1 supervision.
 //!
-//! aftermath-init (PID 1) execs this first thing (same PID). It looks for a
-//! small ext4 disk labelled AFTERMATH_HOST and, if found, makes the root an
-//! overlayfs:
+//! aftermath-init execs this first (same PID). The small bootstrap dispatches
+//! to `live`, which mounts a matching disk-backed SquashFS. Older full-root
+//! initramfs images retain their original path for compatibility. Both use:
 //!
-//!   lower = the image (the initramfs rootfs in RAM, read-only, always clean)
+//!   lower = the clean image (SquashFS, or the legacy RAM image)
 //!   upper = <disk>/upper   (everything changed in the VM: pacman -Syu, /root...)
 //!
-//! then moves that overlay onto / (switch_root style) and execs /usr/bin/init
-//! again with AFTERMATH_EARLY_DONE=1. Whatever goes wrong (no disk, mount
-//! error, saved changes that hide /usr/bin/init, a panic) it execs init on
-//! the plain RAM root instead: plan B. Skipped with `aftermath.overlay=off`
-//! (GRUB: "clean image") and in BusyBox rescue mode.
+//! The overlay becomes /, then init is exec'd with AFTERMATH_EARLY_DONE=1.
+//! An unusable persistent upper selects a temporary layer over SquashFS.
+//! A missing/mismatched image enters the bootstrap's independent BusyBox.
+//! `aftermath.overlay=off` skips saved changes; BusyBox mode skips SquashFS.
 //!
 //! Paths the image owns (Aftermath's own binaries, kernel modules, /boot)
 //! are removed from the upper layer at every boot, so a rebuilt image always

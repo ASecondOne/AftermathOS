@@ -71,7 +71,7 @@ pub struct RunArgs {
     /// you apt install in the VM stays on out/strata.img).
     #[arg(long)]
     pub strata_snapshot: bool,
-    /// Don't attach the host overlay disk: RAM root, nothing is saved.
+    /// Don't attach the host overlay disk: temporary writes, nothing is saved.
     #[arg(long)]
     pub no_overlay: bool,
     /// Attach the host overlay disk but throw its writes away at exit.
@@ -205,7 +205,7 @@ pub fn run(ctx: &Ctx, a: &RunArgs) -> Result<()> {
 
     // Host overlay disk: makes the host root persistent (aftermath-early).
     if a.no_overlay {
-        println!("host overlay disk not attached (--no-overlay): RAM root, changes are not saved");
+        println!("host overlay disk not attached (--no-overlay): temporary writes, changes are not saved");
     } else {
         crate::persist::ensure_host_overlay(ctx, crate::persist::DEFAULT_SIZE)?;
         let snap = if a.overlay_snapshot { "on" } else { "off" };

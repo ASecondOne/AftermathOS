@@ -3,7 +3,8 @@
 //! out/host-overlay.img is a small sparse ext4 disk (label AFTERMATH_HOST).
 //! At boot aftermath-early stacks it as an overlayfs upper layer on top of the
 //! read-only image, so `pacman -Syu`, files in /root etc. survive reboots while
-//! the image itself stays clean. Missing or broken disk -> RAM root (plan B).
+//! the image itself stays clean. Missing or broken disk -> temporary writable
+//! layer over the same disk-backed SquashFS (plan B).
 
 use std::fs;
 use std::io::{BufRead, Write};
@@ -99,9 +100,9 @@ pub fn reset_vm(ctx: &Ctx, a: &ResetArgs) -> Result<()> {
         );
     }
     if a.keep_rootfs {
-        println!("  - keep out/rootfs, repack the initramfs (sudo)");
+        println!("  - keep out/rootfs, rebuild SquashFS and the bootstrap (sudo)");
     } else {
-        println!("  - recreate out/rootfs with pacstrap (sudo, download), repack the initramfs");
+        println!("  - recreate out/rootfs with pacstrap (sudo, download), rebuild SquashFS and the bootstrap");
     }
     println!("  - rebuild the GRUB disk image and a fresh empty host overlay disk");
     if ctx.dry_run {

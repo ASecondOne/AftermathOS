@@ -443,7 +443,7 @@ menuentry "Power off" --id poweroff --class shutdown {{
 
 // ---------------------------------------------------------- disk image ----
 
-/// Rebuild the GRUB disk image if kernel, initramfs or GRUB files changed.
+/// Rebuild the disk if kernel, bootstrap, SquashFS or GRUB files changed.
 pub fn ensure_disk(ctx: &Ctx) -> Result<()> {
     ensure_tree(ctx)?;
     let inputs = [
@@ -452,14 +452,14 @@ pub fn ensure_disk(ctx: &Ctx) -> Result<()> {
         mtime(&ctx.root_image()),
         newest_mtime(&tree(ctx)),
     ];
-    if is_stale(&disk_image(ctx), &inputs) {
+    if !ctx.root_image().exists() || is_stale(&disk_image(ctx), &inputs) {
         build_disk(ctx, &[])?;
     }
     Ok(())
 }
 
 /// MBR disk: [MBR + GRUB core.img in the 1 MiB gap][FAT32 partition, type EF].
-/// The FAT partition holds EFI/BOOT/BOOTX64.EFI, /boot/grub, kernel, initramfs.
+/// The FAT partition holds EFI, GRUB, kernel, bootstrap and the SquashFS root.
 /// `grubenv`: extra variables for the boot partition's grubenv (e.g. test hooks).
 pub fn build_disk(ctx: &Ctx, grubenv: &[(String, String)]) -> Result<()> {
     for p in [ctx.kernel_image(), ctx.initramfs(), ctx.root_image()] {

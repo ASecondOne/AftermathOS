@@ -35,9 +35,9 @@ may be reused; those components have not been rewritten in Rust. See `AGENTS.md`
  firmware (BIOS/UEFI)
    └─ GRUB with the Aftermath OS theme (disk image or ISO)  ── or ──  QEMU -kernel/-initrd (--direct)
         └─ Linux 7.4-rc3 from ./linux  (config: defconfig + kvm_guest + config/kernel/aftermath.config)
-             └─ initramfs = the whole Arch rootfs (zstd cpio, unpacked into RAM)
+             └─ small initramfs = static Rust bootstrap/init + private BusyBox
                   └─ rdinit=/usr/bin/init → aftermath-init (PID 1, tiny, never panics)
-                       ├─ aftermath-early: image + overlay disk → persistent / (fail → RAM root)
+                       ├─ aftermath-early: disk-backed SquashFS + writable overlay → /
                        ├─ mounts /proc /sys /dev /run /tmp, cgroup2; sets hostname
                        ├─ reaps zombies; poweroff/reboot/halt on signal
                        └─ supervises /usr/lib/aftermath/aftermath-engine
@@ -56,9 +56,12 @@ The rootfs is built with `pacstrap` from `config/packages.x86_64`. That list
 deliberately avoids Arch's `base` meta package, because `base` pulls in
 systemd. (Some packages still need `systemd-libs`, which is only a library.)
 
-Shipping the rootfs as one big initramfs keeps the first prototype simple: no
-mkinitcpio, no squashfs, no `switch_root`. A real live/installed layout comes
-later (see *Next steps*).
+The bootstrap is about 2 MiB. The full root lives in
+`rootfs-aftermath.squashfs` on the boot disk or ISO, read on demand rather than
+unpacked into RAM. Direct QEMU boot attaches that image as a read-only disk.
+Early Rust code checks the matching build ID and mounts the root before handing
+over to normal init. Missing or damaged root images enter independent BusyBox
+rescue. No mkinitcpio or generated boot scripts are involved.
 
 ## Strata: Arch + Ubuntu side by side (Bedrock style)
 
@@ -133,11 +136,8 @@ strat --which apt               # -> ubuntu
 
 **How it works**
 
-* **Storage: a separate strata disk.** The initramfs is unpacked into RAM, so
-  putting Ubuntu (~0.5-1 GB) there would cost that much RAM on every boot and
-  everything `apt` installs would vanish on reboot. A squashfs would fix the
-  RAM cost but is read-only (apt then needs an overlay whose upper layer again
-  needs a disk). So strata live on their own **ext4 disk** (`out/strata.img`,
+* **Storage: a separate strata disk.** Strata use their own writable
+  **ext4 disk** (`out/strata.img`,
   label `AFTERMATH_STRATA`), writable and persistent. `cargo am run`
   attaches it as a second virtio disk.
 * **`aftermath-strata setup`** (`crates/aftermath-strata`), run by the engine
@@ -297,7 +297,7 @@ cargo am run                     # attaches out/strata.img automatically
 | `cargo am stratum image [--size 8G]` | Rebuilds `out/strata.img` from `out/strata/` (`mkfs.ext4 -d`, sparse file) | **yes** |
 | `cargo am stratum list` | Built strata, their release, what strata.toml says, disk usage | no |
 | `cargo am stratum remove <name>` | `sudo rm -rf --one-file-system out/strata/<name>`, rebuilds the disk | **yes** |
-| `cargo am run --no-overlay` / `--overlay-snapshot` | boot without the host overlay disk (RAM root) / throw away new changes | no |
+| `cargo am run --no-overlay` / `--overlay-snapshot` | use a temporary writable layer / throw away new changes | no |
 | `cargo am run --no-strata` / `--strata-snapshot` | boot without the strata disk (host mode) / throw away writes to it | no |
 | `cargo am clean --strata` | delete `out/strata` and `out/strata.img` | **yes** |
 
@@ -323,21 +323,22 @@ attached).
 
 ## Persistent host root (saved changes) and `cargo am reset-vm`
 
-The image (the initramfs) stays a clean, read-only base. A small extra disk,
+The SquashFS image stays a clean, read-only base on disk. A small extra disk,
 `out/host-overlay.img` (2G sparse, ext4 label `AFTERMATH_HOST`, created by
 `cargo am run` without root), holds everything you change in the VM:
 
 ```
  aftermath-init (PID 1) ──exec──▶ aftermath-early (same PID, before anything else)
      finds the AFTERMATH_HOST disk, mounts it, then
-     overlayfs:  lower = the image (RAM, read-only)   upper = <disk>/upper
+     overlayfs:  lower = SquashFS (disk, read-only)   upper = <disk>/upper
      moves the overlay onto / (switch_root style) ──exec──▶ aftermath-init again
-     anything wrong ──▶ exec aftermath-init on the plain RAM root (plan B)
+     no usable upper ──▶ temporary writable layer over the same SquashFS
+     no usable image ──▶ independent bootstrap BusyBox rescue
 ```
 
 * `pacman -Syu`, installed packages, `/root`, `/etc` edits survive reboots.
   The console banner says which one you got: *Changes to the system are saved*
-  or *RAM root: changes are lost at poweroff*.
+  or *Temporary writable root: changes are lost at poweroff*.
 * The disk stays mounted at `/aftermath/hostdisk` (`upper/` = your changes).
 * Paths the image owns are removed from the saved changes at every boot
   (`/usr/lib/aftermath`, `/usr/bin/aftermath-init`, `/usr/lib/modules`,
@@ -346,17 +347,18 @@ The image (the initramfs) stays a clean, read-only base. A small extra disk,
 * Every image has a build id; when the image was rebuilt under existing saved
   changes, aftermath-early logs a warning (packages you upgraded in the VM
   shadow the image's newer ones; if that bites: "clean image" or `reset-vm`).
-* **Plan B**: no disk → RAM root (normal). Mount error, or saved changes that
-  hide `/usr/bin/init`, the engine or bash → logged as `persistent root FAILED`
-  and the boot continues on the RAM root. The GRUB entry **"clean image, ignore
-  saved changes"** (`aftermath.overlay=off`) and the BusyBox rescue layer never
-  use the overlay; in rescue the disk is mounted read-only under `/mnt/<dev>` so
-  you can repair `upper/`.
-* RAM: the image still lives in RAM (it is the lower layer); only your changes
-  go to disk. A squashfs image to cut RAM use is a later step.
+* **Plan B**: missing/broken overlay disk or saved changes hiding the boot
+  programs → a temporary writable layer over the clean SquashFS. The GRUB
+  **"clean image, ignore saved changes"** entry (`aftermath.overlay=off`)
+  deliberately chooses that layer. It leaves the saved disk untouched.
+* **BusyBox rescue** skips SquashFS entirely, using the bootstrap's static
+  tools. Data partitions are mounted read-only under `/mnt/<dev>` for repairs.
+  An unavailable or mismatched root image also enters this rescue.
+* RAM contains the small bootstrap, active program pages and filesystem cache.
+  Temporary writes use tmpfs; persistent writes use the overlay disk.
 
 ```sh
-cargo am run --no-overlay          # RAM root, nothing saved
+cargo am run --no-overlay          # temporary writable layer, nothing saved
 cargo am run --overlay-snapshot    # use the saved changes, throw new ones away
 cargo am reset-vm                  # fresh VM (asks first): see below
 cargo am reset-vm -n               # only show what it would do
@@ -399,7 +401,7 @@ The same GRUB setup is used by:
   `cargo am run` boots by default). It is built **without sudo**: one
   FAT32 partition written with mtools (`EFI/BOOT/BOOTX64.EFI` for UEFI,
   GRUB `boot.img` + `core.img` in the MBR for BIOS), holding `/boot/grub`,
-  the kernel and the initramfs.
+  the kernel, small initramfs and SquashFS root image.
 * the **ISO** (`grub-mkrescue`, BIOS + UEFI).
 * the **rootfs**: `grub` and `efibootmgr` are in `config/packages.x86_64`,
   and `/boot/grub` (config + theme + fonts) plus `/boot/vmlinuz-aftermath`
@@ -415,7 +417,7 @@ the next one by itself:
 | 1. **Full** | `aftermath-engine --mode full`: strata + services + shells | strata fail → engine keeps going in host mode (logged); engine crashes 3x → layer 2 |
 | 2. **Arch host** | `aftermath-engine --mode host`: plain Arch, no strata | engine crashes 3x → layer 3 |
 | 3. **BusyBox rescue** | static BusyBox shell on every console (`/usr/lib/aftermath/rescue/busybox`), all partitions mounted **read-only** under `/mnt/<dev>` | – |
-| before layer 1 | aftermath-early sets up the persistent root (host overlay disk) | missing/broken disk or saved changes that hide init → plain RAM root |
+| before layer 1 | aftermath-early mounts SquashFS and the writable upper layer | bad upper → temporary layer; missing/mismatched root image → bootstrap BusyBox |
 | last resort | if PID 1 itself panics, it catches the panic and goes to layer 3 | – |
 
 How the pieces fit:
@@ -637,8 +639,8 @@ Plasma before deleting the old VM data, so a source build failure leaves saved
 data intact. `--keep-rootfs` installs newly required packages before repacking.
 The QEMU window's hardware Reset action only reboots the existing image; source
 rebuilding happens through the Cargo commands. The default VM uses UEFI/OVMF
-and 8 GiB RAM. `--bios` retains legacy boot support, whose GRUB initramfs loader
-can reject large desktop images.
+and 4 GiB RAM. `--bios` selects legacy firmware; both firmware paths use the
+small bootstrap and disk-backed root.
 
 At the graphical screen, use temporary **bob / bob** credentials. The temporary
 root password is also **bob**. These are development defaults, initialized once
@@ -861,12 +863,15 @@ The integration test is Rust on both host and guest:
 
 ```sh
 cargo test --workspace
-cargo am smoke-sessions
 cargo am smoke-desktop
 cargo am smoke-desktop --grub       # include the default UEFI/OVMF → GRUB path
+cargo am smoke-desktop --grub --bios
+cargo am smoke-sessions             # reuses the private root fixture above
+cargo am smoke-live                 # real reboot/persistence/recovery checks, UEFI
+cargo am smoke-live --bios
 ```
 
-The smoke command boots a private RAM-only QEMU guest with current binaries,
+The session smoke command boots a private QEMU guest with current binaries,
 configuration and no saved VM disks. Its temporary account/helper are never
 installed into normal images. It checks account creation, private homes,
 interactive setup, a normal user's own password change, password locking/unlocking,
@@ -876,15 +881,29 @@ unprivileged registration denial, final-logout cleanup and symlink handling.
 It also uses a private stratum account namespace to check ID reservation,
 database lock contention, synchronization retries and automatic password sharing.
 Credentials are not passed as command-line arguments or printed to the console.
+This suite isolates Aftermath-owned runtimes by disabling optional elogind in
+its private PAM policy; graphical smoke separately covers elogind ownership.
+Because unprivileged package extraction strips set-ID modes, its guest probe
+restores the signed Arch packages' `passwd` and `unix_chkpwd` modes inside the
+disposable guest. Production pacstrap preserves those modes normally.
 Artifacts live under `out/vm/session-smoke/`. Supervisor test child programs
 are also Rust, compiled once per test process with the host's Rust compiler.
 
-`smoke-desktop` builds and boots a private RAM-only graphical guest without the
+`smoke-desktop` builds and boots a private graphical guest without the
 saved VM disks. It checks the temporary Bob/root passwords through PAM, drives
 the real SDDM greeter through QMP input, checks Plasma/KWin D-Bus ownership and
 Bob's privileges, then verifies logout/runtime cleanup and return to the greeter.
 Its logs and screenshots are under `out/vm/desktop-smoke`. `--grub` also tests
 the packaged GRUB disk through UEFI/OVMF; `--grub --bios` selects legacy firmware.
+Both use a roughly 2 MiB bootstrap, a disk-backed SquashFS root and 4 GiB RAM.
+
+`smoke-live` reuses that immutable fixture with new, disposable boot/overlay
+disks. In one QEMU process it tests actual reboots: saved `/root` and `/etc`
+files, lower-file whiteouts, clean-image isolation and restoration, successful
+GRUB acknowledgement, an unconfirmed launch counted once, four-failure rescue,
+and a normal entry with its root image removed. Rescue reads saved data while
+using only the bootstrap. These recovery tests run with 2 GiB RAM; artifacts
+are under `out/vm/live-smoke-{uefi,bios}`. The user's saved disks are not attached.
 
 The report lists compatibility limits separately from installed files:
 
@@ -999,7 +1018,7 @@ cargo am check-deps
 It prints a table and a ready-to-paste `sudo pacman -S --needed ...` line.
 The packages involved are: `bc base-devel flex bison perl libelf openssl
 pahole` (kernel), `arch-install-scripts archlinux-keyring` (rootfs),
-`libarchive zstd` (initramfs), `grub libisoburn mtools ttf-dejavu` (GRUB disk, theme, ISO),
+`libarchive zstd squashfs-tools` (bootstrap and live root), `grub libisoburn mtools ttf-dejavu` (GRUB disk, theme, ISO),
 `qemu-desktop edk2-ovmf` (QEMU), `debootstrap ubuntu-keyring e2fsprogs`
 (Ubuntu stratum, optional), `kbd` (precompiled console keymaps, optional).
 For fast VMs your user needs access to `/dev/kvm`.
@@ -1069,13 +1088,15 @@ cargo am --dry-run iso
 | `cargo am init` | Builds `aftermath-init` (PID 1) and `aftermath-engine` as static binaries | no |
 | `cargo am rootfs` | `pacstrap`s a fresh Arch rootfs into `out/rootfs` | **yes** |
 | `cargo am grub [--disk]` | Generates the GRUB menu, theme images (Rust-drawn PNGs) and fonts in `out/grub`; `--disk` also builds the BIOS+UEFI boot disk image | no |
-| `cargo am initramfs` | Copies init + `config/overlay` + kernel modules into the rootfs and packs it as `out/initramfs-aftermath.img` | **yes** |
+| `cargo am initramfs` | Stages init/config/modules, builds `out/rootfs-aftermath.squashfs` and a small `out/initramfs-aftermath.img` | **yes** |
 | `cargo am iso` | Builds whatever is missing, then a BIOS+UEFI bootable ISO | yes if rootfs/initramfs need (re)building |
 | `cargo am run` (alias `qemu`) | Builds whatever is missing or outdated, then boots QEMU through GRUB (or `--direct` / `--iso`) | same as above |
 | `cargo am stratum ubuntu\|image\|list\|remove` | Build / list / remove strata and the strata disk `out/strata.img` (see *Strata*) | **yes** (except `list`) |
 | `cargo am reset-vm [--yes] [--keep-strata] [--keep-rootfs] [--logs]` | Wipes everything the VM changed and rebuilds a fresh VM (asks first) | **yes** |
 | `cargo am logs [-f tty1] [-b N] [--list]` | Prints the VM's session logs (every console + kernel log) from the strata disk | no |
-| `cargo am smoke-sessions` | Rust host/guest test of user management and authenticated PAM sessions in a private RAM-only QEMU guest | no (initial kernel/initramfs must exist) |
+| `cargo am smoke-desktop [--grub] [--bios]` | Builds a private live image, verifies rendered Plasma Wayland login/logout | no |
+| `cargo am smoke-sessions` | Rust host/guest user/PAM tests on the private SquashFS root | no (run graphical smoke first) |
+| `cargo am smoke-live [--bios]` | Real reboot tests for saved changes, clean image, GRUB counter and independent rescue | no (run graphical smoke first) |
 | `cargo am clean` | Deletes generated files in `out/` | only with `--rootfs`/`--strata`/`--all` |
 
 Examples:
@@ -1095,9 +1116,9 @@ cargo am rootfs -p vim -p htop      # extra packages this time
 #   permanent extras: add them to config/packages.x86_64, then --force
 
 # Boot in QEMU through GRUB (the themed "Aftermath OS" menu)
-cargo am run                        # window (GTK), UEFI/OVMF, 8G RAM, 4 CPUs, KVM
+cargo am run                        # window (GTK), UEFI/OVMF, 4G RAM, 4 CPUs, KVM
 cargo am run --uefi                 # explicit UEFI (already the default)
-cargo am run --bios                 # legacy firmware; large images may exceed loader limits
+cargo am run --bios                 # legacy firmware, same SquashFS root
 cargo am run --direct               # skip GRUB: QEMU loads kernel + initramfs (fastest)
 cargo am run --direct --debug       # + earlyprintk, ignore_loglevel, loglevel=8
 cargo am run --headless             # no window, only the serial log (for test boots)
@@ -1151,7 +1172,8 @@ Everything goes into `out/` (gitignored); Rust binaries go into `target/`.
 | `out/kernel/modules/` | kernel modules (`usr/lib/modules/<version>`) |
 | `out/rootfs/` | the Arch rootfs (**root-owned**, remove with `cargo am clean --rootfs`) |
 | `out/overlay/` | staging copy of what gets added to the rootfs |
-| `out/initramfs-aftermath.img` | rootfs packed as zstd cpio |
+| `out/initramfs-aftermath.img` | small static bootstrap and independent BusyBox rescue, zstd cpio |
+| `out/rootfs-aftermath.squashfs` | compressed read-only root, mounted from disk/ISO on demand |
 | `out/grub/` | generated GRUB tree: `boot/grub/{grub.cfg,fonts,themes}` |
 | `out/aftermath-<version>-x86_64.img` | GRUB boot disk (BIOS + UEFI), used by `cargo am run` |
 | `out/iso-root/` | ISO contents before packing |
@@ -1180,9 +1202,8 @@ sudo dd if=out/aftermath-0.1.0-x86_64.iso of=/dev/sdX bs=4M status=progress ofla
   registration and elogind seat/device control. Next, one step at a time:
   service cgroups/readiness and the general user-session/systemd compatibility
   layer. See *Default Plasma desktop and device discovery* above.
-- **Boot layout**: squashfs image as the overlay's lower layer (today the
-  lower layer is the RAM initramfs), so RAM use no longer equals the rootfs
-  size; then an installer.
+- **Boot layout**: disk-backed SquashFS is now the overlay's lower layer.
+  Next: an installer and validation on physical hardware.
 - **Strata**: more downloadable strata (e.g. Alpine), cross
   `.desktop` Exec rewriting, a FUSE crossfs instead of generated symlinks.
 - **Windows stratum**: research phase.
