@@ -36,14 +36,25 @@ pub(super) fn boot() -> Result<String, String> {
         return Err("BusyBox rescue requested; skipping the desktop root image".into());
     }
     let mut image = discover()?;
+    let mut warning = None;
     let (root, backing, descriptor, mut overlay_mounts) = match persistent(&image, &cmdline) {
         Ok(overlay) => overlay,
         Err(why) => {
             warn(&format!("{why}; using a temporary writable layer"));
+            if !cmdline
+                .split_whitespace()
+                .any(|arg| arg == "aftermath.overlay=off")
+            {
+                warning = Some(format!("Saved changes unavailable: {why}. This session uses temporary storage; your saved disk has not been erased."));
+            }
             temporary(&image)?
         }
     };
     validate_root(&root)?;
+    if let Some(warning) = warning {
+        fs::create_dir_all(root.join("aftermath/image")).map_err(error)?;
+        fs::write(root.join("aftermath/image/boot-warning"), warning).map_err(error)?;
+    }
     keep_mount(
         &root,
         &backing,
@@ -80,10 +91,18 @@ fn rescue_requested(cmdline: &str) -> bool {
 /// Try raw SquashFS disks (direct boot), FAT boot partitions and live ISOs.
 fn discover() -> Result<Image, String> {
     fs::create_dir_all(WORK).map_err(error)?;
-    for _ in 0..50 {
+    for _ in 0..200 {
         let mut devices: Vec<_> = fs::read_dir("/sys/class/block")
             .map_err(error)?
             .flatten()
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                !name.starts_with("loop")
+                    && !name.starts_with("ram")
+                    && fs::read_to_string(entry.path().join("size"))
+                        .is_ok_and(|size| size.trim() != "0")
+            })
             .map(|entry| Path::new("/dev").join(entry.file_name()))
             .collect();
         devices.sort();

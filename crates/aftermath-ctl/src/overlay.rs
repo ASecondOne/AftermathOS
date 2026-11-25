@@ -31,6 +31,7 @@ pub fn status() -> Value {
         "reset_pending": pending,
         "used_bytes": usage.map(|u| u.0),
         "size_bytes": usage.map(|u| u.1),
+        "warning": fs::read_to_string("/aftermath/image/boot-warning").ok(),
     })
 }
 
