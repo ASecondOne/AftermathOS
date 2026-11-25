@@ -7,12 +7,15 @@
 
 mod ctx;
 mod deps;
+mod desktop_smoke;
 mod grub;
 mod image;
 mod kernel;
 mod logs;
 mod persist;
+mod plasma;
 mod qemu;
+mod session_smoke;
 mod stratum;
 
 use anyhow::Result;
@@ -46,6 +49,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Verify the graphical login and Plasma in a disposable QEMU guest
+    SmokeDesktop {
+        /// Verify the normal GRUB disk boot, including firmware graphics handoff
+        #[arg(long)]
+        grub: bool,
+        /// Use legacy BIOS for the GRUB integration test (UEFI is the default)
+        #[arg(long, requires = "grub")]
+        bios: bool,
+    },
+    /// Build local Plasma sources and standalone elogind into out/plasma/stage
+    Plasma,
+    #[command(hide = true)]
+    PlasmaRuntime,
+    /// Test Rust account/PAM/session integration in a private QEMU guest (no saved disks)
+    SmokeSessions,
     /// Check which host tools are installed and print the pacman packages
     /// for anything missing.
     CheckDeps,
@@ -96,6 +114,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let ctx = Ctx::new(cli.dry_run)?;
     match cli.cmd {
+        Cmd::SmokeDesktop { grub, bios } => desktop_smoke::run(&ctx, grub, bios),
+        Cmd::Plasma => plasma::build(&ctx).map(|_| ()),
+        Cmd::PlasmaRuntime => plasma::runtime(&ctx).map(|_| ()),
+        Cmd::SmokeSessions => session_smoke::run(&ctx),
         Cmd::CheckDeps => deps::check_deps(),
         Cmd::Kernel(a) => kernel::build(&ctx, &a),
         Cmd::Init => image::build_init(&ctx).map(|_| ()),

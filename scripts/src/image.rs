@@ -29,7 +29,7 @@ const INIT_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// to it).
 pub fn build_init(ctx: &Ctx) -> Result<PathBuf> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut c = Command::new(cargo);
+    let mut c = Command::new(&cargo);
     c.current_dir(&ctx.root)
         .args([
             "build",
@@ -48,6 +48,20 @@ pub fn build_init(ctx: &Ctx) -> Result<PathBuf> {
         // Static glibc binary: PID 1 must not break when libraries change.
         .env("RUSTFLAGS", "-C target-feature=+crt-static");
     ctx.run(&mut c)?;
+    // PAM loads a shared module into the distro login process. Keep it
+    // dynamically linked to the guest's PAM/libc; PID 1 and the engine stay static.
+    let mut pam = Command::new(&cargo);
+    pam.current_dir(&ctx.root)
+        .args([
+            "build",
+            "--release",
+            "--package",
+            "aftermath-pam",
+            "--target",
+            INIT_TARGET,
+        ])
+        .env("RUSTFLAGS", "");
+    ctx.run(&mut pam)?;
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| ctx.root.join("target"));
@@ -93,6 +107,9 @@ pub fn rootfs(ctx: &Ctx, a: &RootfsArgs) -> Result<()> {
             .arg("--needed")
             .args(&pkgs);
         ctx.run(&mut c)?;
+        if !ctx.dry_run {
+            fs::copy(&list, ctx.out.join("rootfs-packages"))?;
+        }
         println!("\nrootfs updated: {}", root.display());
         return Ok(());
     }
@@ -118,6 +135,9 @@ pub fn rootfs(ctx: &Ctx, a: &RootfsArgs) -> Result<()> {
         .arg(&root)
         .args(&pkgs);
     ctx.run(&mut c)?;
+    if !ctx.dry_run {
+        fs::copy(&list, ctx.out.join("rootfs-packages"))?;
+    }
     println!("\nrootfs ready: {}", root.display());
     Ok(())
 }
@@ -155,6 +175,9 @@ pub fn initramfs(ctx: &Ctx) -> Result<()> {
 
 /// Rebuild the initramfs only if init, overlay, modules or packages changed.
 pub fn ensure_initramfs(ctx: &Ctx) -> Result<()> {
+    if crate::plasma::enabled(ctx)? {
+        crate::plasma::ensure(ctx)?;
+    }
     let init = build_init(ctx)?;
     let inputs = [
         mtime(&init),
@@ -163,11 +186,13 @@ pub fn ensure_initramfs(ctx: &Ctx) -> Result<()> {
         mtime(&init.with_file_name("aftermath-early")),
         mtime(&init.with_file_name("strat")),
         mtime(&init.with_file_name("amctl")),
+        mtime(&init.with_file_name("libpam_aftermath.so")),
         newest_mtime(&ctx.config().join("overlay")),
         newest_mtime(&ctx.kernel_modules().join("usr/lib/modules")),
         mtime(&ctx.rootfs().join("var/lib/pacman/local")),
         newest_mtime(&grub::tree(ctx)),
         mtime(&ctx.kernel_image()),
+        mtime(&ctx.out.join("plasma/built")),
     ];
     if is_stale(&ctx.initramfs(), &inputs) {
         pack_initramfs(ctx, &init)
@@ -178,6 +203,11 @@ pub fn ensure_initramfs(ctx: &Ctx) -> Result<()> {
 }
 
 fn pack_initramfs(ctx: &Ctx, init: &Path) -> Result<()> {
+    let plasma = if crate::plasma::enabled(ctx)? {
+        Some(crate::plasma::ensure(ctx)?)
+    } else {
+        None
+    };
     if !rootfs_exists(ctx) && !ctx.dry_run {
         bail!("no rootfs yet, run `cargo am rootfs` first (uses sudo pacstrap)");
     }
@@ -189,6 +219,9 @@ fn pack_initramfs(ctx: &Ctx, init: &Path) -> Result<()> {
     ctx.remove(&stage)?;
     println!("==> stage overlay in {}", stage.display());
     if !ctx.dry_run {
+        if let Some(plasma) = &plasma {
+            copy_tree(plasma, &stage)?;
+        }
         copy_tree(&ctx.config().join("overlay"), &stage)?;
         let bin = stage.join("usr/bin");
         fs::create_dir_all(&bin)?;
@@ -210,7 +243,12 @@ fn pack_initramfs(ctx: &Ctx, init: &Path) -> Result<()> {
         )?;
         // Strata: the setup service and the `strat` multicall launcher (all
         // /aftermath/cross launchers are symlinks to it).
-        for name in ["aftermath-strata", "strat", "aftermath-early"] {
+        for name in [
+            "aftermath-strata",
+            "strat",
+            "aftermath-early",
+            "aftermath-desktop-session",
+        ] {
             let src = init.with_file_name(name);
             fs::copy(&src, lib.join(name)).with_context(|| format!("copy {}", src.display()))?;
             fs::set_permissions(lib.join(name), fs::Permissions::from_mode(0o755))?;
@@ -220,6 +258,16 @@ fn pack_initramfs(ctx: &Ctx, init: &Path) -> Result<()> {
         let amctl = init.with_file_name("amctl");
         fs::copy(&amctl, bin.join("amctl")).with_context(|| format!("copy {}", amctl.display()))?;
         fs::set_permissions(bin.join("amctl"), fs::Permissions::from_mode(0o755))?;
+        let pam_dir = stage.join("usr/lib/security");
+        fs::create_dir_all(&pam_dir)?;
+        fs::copy(
+            init.with_file_name("libpam_aftermath.so"),
+            pam_dir.join("pam_aftermath.so"),
+        )?;
+        fs::set_permissions(
+            pam_dir.join("pam_aftermath.so"),
+            fs::Permissions::from_mode(0o755),
+        )?;
         stage_keymaps(ctx, &stage)?;
         for d in ["aftermath/store", "aftermath/cross"] {
             fs::create_dir_all(stage.join(d))?;
@@ -340,10 +388,26 @@ fn stage_keymaps(ctx: &Ctx, stage: &Path) -> Result<()> {
 
 pub fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
+    let mode = fs::metadata(dst)?.permissions().mode();
+    if mode & 0o200 == 0 {
+        fs::set_permissions(dst, fs::Permissions::from_mode(mode | 0o700))?;
+    }
     for e in fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
         let e = e?;
         let (s, d) = (e.path(), dst.join(e.file_name()));
         let ft = e.file_type()?;
+        if let Ok(existing) = fs::symlink_metadata(&d) {
+            if ft.is_dir() && existing.is_dir() {
+                // Merge real directories, never follow destination symlinks.
+            } else if existing.is_dir() {
+                bail!(
+                    "refusing to replace directory {} with a file/symlink",
+                    d.display()
+                );
+            } else {
+                fs::remove_file(&d)?;
+            }
+        }
         if ft.is_symlink() {
             symlink(fs::read_link(&s)?, &d)?;
         } else if ft.is_dir() {
@@ -352,6 +416,7 @@ pub fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
             fs::copy(&s, &d)?;
         }
     }
+    fs::set_permissions(dst, fs::metadata(src)?.permissions())?;
     Ok(())
 }
 
@@ -370,6 +435,17 @@ pub fn ensure_rootfs(ctx: &Ctx) -> Result<()> {
     if !rootfs_exists(ctx) {
         println!("rootfs missing, creating it with sudo pacstrap...");
         rootfs(ctx, &RootfsArgs::default())?;
+    } else if is_stale(
+        &ctx.out.join("rootfs-packages"),
+        &[mtime(&ctx.config().join("packages.x86_64"))],
+    ) {
+        rootfs(
+            ctx,
+            &RootfsArgs {
+                update: true,
+                ..Default::default()
+            },
+        )?;
     }
     Ok(())
 }
@@ -483,4 +559,58 @@ pub fn clean(ctx: &Ctx, a: &CleanArgs) -> Result<()> {
     }
     println!("clean done (Rust build output: use `cargo clean`)");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_merge_replaces_links_without_writing_outside_the_stage() {
+        let root = std::env::temp_dir().join(format!(
+            "aftermath-overlay-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let src = root.join("source");
+        let dst = root.join("stage");
+        let outside = root.join("outside");
+        for dir in [&src, &dst, &outside, &src.join("branch")] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(outside.join("file"), b"untouched").unwrap();
+        fs::write(src.join("file"), b"overlay file").unwrap();
+        fs::write(src.join("branch/new"), b"overlay directory").unwrap();
+        fs::write(src.join("readonly"), b"replacement").unwrap();
+        fs::write(dst.join("readonly"), b"old").unwrap();
+        fs::set_permissions(dst.join("readonly"), fs::Permissions::from_mode(0o444)).unwrap();
+        symlink(outside.join("file"), dst.join("file")).unwrap();
+        symlink(&outside, dst.join("branch")).unwrap();
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o500)).unwrap();
+
+        copy_tree(&src, &dst).unwrap();
+        assert_eq!(fs::read(outside.join("file")).unwrap(), b"untouched");
+        assert!(!outside.join("new").exists());
+        assert_eq!(fs::read(dst.join("file")).unwrap(), b"overlay file");
+        assert_eq!(
+            fs::read(dst.join("branch/new")).unwrap(),
+            b"overlay directory"
+        );
+        assert_eq!(fs::read(dst.join("readonly")).unwrap(), b"replacement");
+        assert!(!dst.join("branch").is_symlink());
+        assert_eq!(
+            fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+
+        fs::write(src.join("directory-conflict"), b"file").unwrap();
+        fs::create_dir(dst.join("directory-conflict")).unwrap();
+        assert!(copy_tree(&src, &dst).is_err());
+        assert!(dst.join("directory-conflict").is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

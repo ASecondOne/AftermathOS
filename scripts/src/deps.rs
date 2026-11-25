@@ -54,6 +54,11 @@ pub const OVMF_VARS: &[&str] = &[
 const DEPS: &[Dep] = &[
     // general
     bin("sudo", "sudo", "root steps (rootfs, initramfs)"),
+    file(
+        &["/usr/lib/libpam.so", "/usr/lib/x86_64-linux-gnu/libpam.so"],
+        "pam",
+        "Rust PAM session module (shared library)",
+    ),
     // kernel
     bin("make", "make", "kernel"),
     bin("gcc", "gcc", "kernel"),
@@ -130,7 +135,7 @@ const DEPS: &[Dep] = &[
     // qemu
     bin("qemu-system-x86_64", "qemu-desktop", "run"),
     bin("qemu-img", "qemu-img", "run --disk"),
-    file(OVMF_CODE, "edk2-ovmf", "run --uefi"),
+    file(OVMF_CODE, "edk2-ovmf", "default UEFI boot"),
     // future
     optional(bin(
         "mksquashfs",

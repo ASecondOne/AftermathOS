@@ -1,0 +1,10 @@
+#%PAM-1.0
+auth       include    system-auth
+account    include    system-auth
+password   include    system-auth
+session    optional   pam_loginuid.so
+session    optional   pam_keyinit.so force revoke
+session    include    system-auth
+session    required   pam_env.so
+session    required   pam_elogind.so type=wayland
+session    required   pam_aftermath.so

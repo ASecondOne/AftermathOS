@@ -8,3 +8,6 @@
 # The Linux kernel source is its own (huge) git repository and not part of
 # this repo. See README "Kernel source" for how to get it.
 /linux/
+
+# Upstream Plasma source repositories, kept separately like the kernel.
+/plasma/

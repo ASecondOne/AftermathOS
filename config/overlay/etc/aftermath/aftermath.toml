@@ -1,5 +1,17 @@
 # Aftermath system settings. Read by aftermath-engine at boot and by amctl.
 
+[desktop]
+enabled = true
+# Temporary development defaults requested for fresh images: bob/bob, root/bob.
+# Applied once to a fresh host root; normal reboots preserve changed passwords.
+development_accounts = true
+
+[console]
+# Authenticated login on Ctrl+Alt+F2. Development root consoles remain on
+# the existing boot consoles; this is still an experimental development image.
+# Empty list disables additional login terminals.
+login_ttys = ["tty2"]
+
 [locale]
 # Console keyboard layout (a kbd keymap name, see /usr/share/kbd/keymaps).
 # German without dead keys by default. Change it here or with

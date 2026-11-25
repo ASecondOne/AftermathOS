@@ -11,6 +11,9 @@ util-linux
 procps-ng
 psmisc
 shadow
+# Authentication policy and existing PAM modules; Aftermath's session module is Rust.
+pam
+pambase
 findutils
 grep
 sed
@@ -24,6 +27,8 @@ less
 which
 nano
 kmod
+# System message bus, supervised directly by aftermath-engine.
+dbus
 # Console keymaps + loadkeys (German layout by default, see /etc/aftermath/aftermath.toml)
 kbd
 iproute2
@@ -44,3 +49,17 @@ dhcpcd
 
 # Rescue layer: static BusyBox CLI (copied to /usr/lib/aftermath/rescue)
 busybox
+
+# Default graphical environment. The local Plasma sources replace the packaged
+# core during image staging; packages supply its coherent runtime dependencies.
+plasma-desktop
+plasma-integration
+sddm
+breeze
+dolphin
+konsole
+mesa
+qt6-wayland
+ttf-dejavu
+xorg-xwayland
+polkit-kde-agent

@@ -15,6 +15,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 png = "0.17"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde_json = "1"
 # Shared strata config parsing (strata.toml) for `cargo am stratum list`.
 aftermath-strata = { path = "../crates/aftermath-strata" }
 # Keyboard config parsing (aftermath.toml [locale]) for the keymap staging.

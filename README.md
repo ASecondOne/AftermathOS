@@ -1,12 +1,17 @@
 # Aftermath
 
-> **Status: experimental.** Aftermath boots to a root shell in QEMU at best.
+> **Status: experimental.** Development consoles and authenticated login work in QEMU.
 > Expect breakage, don't install it on hardware you care about.
 
-Aftermath is an Arch-based Linux distribution with **no systemd**. Its PID 1 is
-a custom init written in Rust, and it ships **Bedrock Linux-style strata**:
+Aftermath is an Arch-based Linux distribution with a **custom Rust init instead
+of systemd as PID 1**. It can reuse standalone components such as udev, and it
+ships **Bedrock Linux-style strata**:
 several complete userlands living side by side, managed by a separate strata
 service that runs next to the normal Arch boot.
+
+**Development rule:** new Aftermath implementation, test helpers and build
+automation are Rust. Existing Linux, PAM, udev, D-Bus and Plasma components
+may be reused; those components have not been rewritten in Rust. See `AGENTS.md`.
 
 ## Vision
 
@@ -36,10 +41,13 @@ service that runs next to the normal Arch boot.
                        ├─ mounts /proc /sys /dev /run /tmp, cgroup2; sets hostname
                        ├─ reaps zombies; poweroff/reboot/halt on signal
                        └─ supervises /usr/lib/aftermath/aftermath-engine
+                            ├─ machine identity + foreground system D-Bus with readiness/health probes
+                            ├─ foreground udev: readiness, coldplug, hotplug, bounded restarts
                             ├─ network: lo + dhcpcd
                             ├─ aftermath-strata setup: strata disk → /aftermath/strata/ubuntu,
                             │    shared mounts, cross launchers  ── fail → plain Arch host mode
-                            ├─ root shell on every console (ttyS0 + tty1)
+                            ├─ development root consoles (ttyS0 + tty1)
+                            ├─ authenticated login on tty2; Rust PAM session/runtime management
                             └─ marks the boot good in GRUB's grubenv
                        (engine keeps crashing → host mode → BusyBox rescue, see "Fallback layers")
 ```
@@ -236,7 +244,9 @@ amctl default order ubuntu arch # order for commands nothing pins (--reset to un
 
 * **Network**: aftermath-engine starts `dhcpcd -b -q --nodev`. `--nodev` matters:
   dhcpcd is built with udev support and otherwise waits for udev to
-  "initialise" each interface; there is no udevd, so `eth0` stayed DOWN.
+  "initialise" each interface. It remains a fallback when udev fails or is
+  disabled. Device discovery runs before DHCP; udev's naming rules may rename
+  `eth0` to a name such as `enp0s2`.
 * **Wait for the network before the prompt**: the engine holds the consoles
   back until there is a default route and a nameserver (usually ~1-3 s, at
   most 15 s; plan B: after that the shells start anyway and dhcpcd keeps
@@ -565,7 +575,7 @@ layer.
 **Subsystems.** Inside the engine every area is a subsystem behind one
 small Rust trait (`crates/aftermath-engine/src/control.rs`: name, read-only
 verbs, `call`, an optional status summary, child-exit and timer hooks).
-Today: `system`, `strata`, `default`, `services`, `boot`, `overlay`, `locale`. Future
+Today: `system`, `strata`, `default`, `services`, `desktop`, `sessions`, `users`, `boot`, `overlay`, `locale`. Future
 pieces (a Windows stratum manager, a D-Bus/logind shim for Plasma) plug in
 as new subsystems plus an amctl subcommand; nothing else changes.
 
@@ -605,6 +615,307 @@ FOO = "bar"
   file survives reboots with the host overlay disk, not on a pure RAM root.
 * `heartbeat.toml` is a shipped example, off by default:
   `amctl services start heartbeat`, then `amctl logs -f --service heartbeat`.
+
+### Default Plasma desktop and device discovery
+
+The default image builds the five local Plasma repositories in `plasma/` and
+starts an SDDM graphical login screen. The selected source baseline is Plasma
+6.8.3 on local `aftermath` branches; the upstream `master` branches remain
+available. Source builds install into `out/plasma/stage`, then into the guest
+image, without replacing the build host's desktop. Build logs are in
+`out/plasma/logs`. Incremental object builds are retained.
+
+```sh
+cargo am plasma                    # build the local Plasma sources and elogind
+cargo am reset-vm                  # rebuild/reset, then open the fresh VM
+cargo am reset-vm --no-run         # rebuild/reset without opening QEMU
+cargo am run                       # rebuild changed inputs and boot normally
+```
+
+The reset command still asks before deleting saved VM changes. It compiles
+Plasma before deleting the old VM data, so a source build failure leaves saved
+data intact. `--keep-rootfs` installs newly required packages before repacking.
+The QEMU window's hardware Reset action only reboots the existing image; source
+rebuilding happens through the Cargo commands. The default VM uses UEFI/OVMF
+and 8 GiB RAM. `--bios` retains legacy boot support, whose GRUB initramfs loader
+can reject large desktop images.
+
+At the graphical screen, use temporary **bob / bob** credentials. The temporary
+root password is also **bob**. These are development defaults, initialized once
+per fresh host root; changing a password survives ordinary reboots. Set
+`[desktop] development_accounts = false` to disable this bootstrap. Set
+`[desktop] enabled = false`, or boot with `aftermath.desktop=off`, for consoles only.
+
+Aftermath's Rust engine supervises udev, the system bus, standalone **elogind**
+and SDDM. Elogind supplies login1, seats and revocable DRM/input access. The Rust
+PAM module registers authenticated sessions while leaving elogind's runtime
+directories under elogind ownership. The Rust SDDM session command runs
+`dbus-run-session -- startplasma-wayland`; Plasma uses its upstream classic
+startup (`systemdBoot=false`). Aftermath remains PID 1. This path does not supply
+a general systemd unit interpreter or per-user systemd1 manager.
+
+```sh
+# Inside Aftermath (any user; works offline too):
+amctl desktop check
+amctl --json desktop check
+amctl desktop devices           # live udev state (needs the running engine)
+amctl desktop bus               # live system D-Bus readiness and supervision
+amctl desktop status            # elogind, graphical login and startup errors
+amctl sessions list             # authenticated sessions and runtime directories
+
+# On the build host, inspect the guest rootfs, not the host installation:
+cargo run -p aftermath-ctl --bin amctl -- desktop check --root out/rootfs
+```
+
+The check inventories executable files for a device manager, `udevadm`,
+`dbus-daemon`, `dbus-send`, the Rust PAM module, `dbus-run-session`,
+`startplasma-wayland`, `kwin_wayland`, elogind, SDDM and the Rust session command in the
+**host stratum**. `--root` bypasses the control socket and only inspects the
+given tree; absolute symlinks resolve inside that tree. Nothing is installed,
+executed, started or enabled. Exit status is **2** when prerequisites remain,
+**1** for an invalid root or another command error, **0** for a ready report.
+Offline file inventory reports `ready: false` because it cannot check a live
+graphical login. The online report also checks the engine's live supervision.
+`present` only means an executable file exists; it does not verify package
+completeness, daemon readiness, graphics drivers or a working session.
+
+**Device discovery at boot.** The engine starts the installed
+`/usr/lib/systemd/systemd-udevd` in the foreground (or a supported `udevd`
+location), waits for `udevadm control --ping`, triggers existing subsystems
+and devices with `--action=add`, then runs a bounded `udevadm settle`.
+This uses the daemon directly; no systemd service manager or unit file is
+started. The provider must support these udevadm commands; the Arch provider
+in the development rootfs was tested in QEMU. Rules load hardware modules,
+populate the device database and apply device names, tags and permissions.
+See the [udev manual](https://www.freedesktop.org/software/systemd/man/latest/udev.html)
+and [udevadm manual](https://www.freedesktop.org/software/systemd/man/latest/udevadm.html).
+
+Startup has a 25-second overall limit. Daemon crashes retry after one second,
+with a limit of five starts in 30 seconds, and repeat discovery on restart.
+Subprocess timeouts are enforced by the engine as well as udevadm. Discovery
+failures are reported as `degraded`; an already running daemon can continue
+handling hotplug. Missing tools or repeated daemon failures also leave boot,
+DHCP and the root consoles available. The live command shows `state`, `pid`,
+`responding`, `coldplug`, restart count, errors and `/run/aftermath/udev.log`
+(RAM, this boot only). `amctl status` also includes device state. Live
+`desktop check` includes this state; `--root` only inventories files.
+`desktop devices` returns 0 for completed discovery, 2 for other device states,
+and 1 when the engine is unavailable or another query error occurs.
+
+Rebuild the guest image with `cargo am run` after changing the engine. Inside
+the updated guest, verify:
+
+```sh
+amctl desktop devices           # state running, responding yes, coldplug complete
+ls -l /dev/dri /dev/input
+udevadm info --query=property /dev/dri/card0
+cat /run/aftermath/udev.log
+```
+
+`aftermath.udev=off` disables this boot step for troubleshooting.
+`aftermath.test=udev-fail` tests repeated daemon failure without losing the
+console. Neither setting is enabled by default. QEMU validation covered DRM
+and input discovery, USB keyboard hotplug/unplug, daemon crash recovery and
+the failed-start fallback, with no persistent VM disks attached. Device tags
+do **not** grant an ordinary user a login session or managed seat access.
+
+**System D-Bus at boot.** The engine prepares machine identity and `/run/dbus`,
+then starts `dbus-daemon` in the foreground using the packaged
+`/usr/share/dbus-1/system.conf`. This retains its dedicated service account,
+authentication and message policies. `dbus` is now an explicit rootfs package;
+older images missing it need `cargo am rootfs --update` before `cargo am run`.
+The existing Arch rootfs already contains the binaries and `dbus` account.
+`dbus-broker-launch` integration is not implemented in this step.
+
+The bus listens at `/run/dbus/system_bus_socket`. Readiness requires an actual
+`org.freedesktop.DBus.ListNames` reply through that address; an existing socket
+file alone is insufficient. Replies are checked again every five seconds.
+Each probe has a two-second engine-enforced timeout, initial readiness has
+a five-second limit, and boot waits at most ten seconds for this subsystem.
+Crashes or failed health checks retry after one second, with a limit of five
+starts in 30 seconds. Restarting a bus disconnects its existing clients.
+Failures leave device discovery, networking and consoles available.
+
+Images ship an empty `/etc/machine-id` and a legacy
+`/var/lib/dbus/machine-id` symlink to it. The engine generates an identity
+on first boot, before device discovery, and keeps both paths consistent.
+The identity persists with the host overlay disk; a RAM-only root gets a new
+one on each boot. Valid existing identities are retained, including an older
+legacy-only ID. Invalid nonempty or conflicting IDs are reported instead of
+silently replaced. The engine refuses to start a second bus on an active
+socket, and only removes a stale or previously owned socket.
+
+Inside an updated guest:
+
+```sh
+amctl desktop bus               # state running, responding yes
+amctl --json desktop bus
+dbus-send --system --print-reply --reply-timeout=1000 \
+  --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames
+cat /run/aftermath/dbus.log       # RAM log, this boot only
+```
+
+`amctl status` and live `desktop check` also show bus state. `desktop bus`
+returns 0 for a responding bus, 2 for other bus states, and 1 for query errors
+or an unavailable engine. `aftermath.dbus=off` disables this subsystem;
+`aftermath.test=dbus-fail` exercises its failed-start fallback. These are off
+by default. QEMU checks cover real replies, the service UID, unprivileged
+access under the packaged policy, crash recovery, identity persistence across
+two boots with a private overlay disk, and continued console/network/device
+operation when the bus cannot start.
+
+This provides the **system bus**. Per-user buses, login1
+and systemd1 APIs remain future work. The daemon can use its packaged classic
+D-Bus activation helper; the engine does not pass `--systemd-activation` or
+interpret systemd service units. See the official
+[daemon options](https://dbus.freedesktop.org/doc/dbus-daemon.1.html),
+[dbus-send options](https://dbus.freedesktop.org/doc/dbus-send.1.html) and
+[machine identity specification](https://dbus.freedesktop.org/doc/dbus-specification.html#standard-interfaces-peer).
+
+**Authenticated console sessions.** After rebuilding with `cargo am run`,
+Ctrl+Alt+F2 opens a login prompt on tty2. Use an existing account and its
+password. The default development image initializes Bob and root as described
+above. Additional normal accounts can be created inside the guest from the
+development root console:
+
+```sh
+amctl users add alice
+```
+
+**Local user management.** `amctl users add NAME` creates an ordinary account
+with its own group, Bash shell and private 0700 home under `/home`, then opens
+an interactive PAM password prompt. New accounts start password-locked; an
+interrupted prompt leaves the account locked. Retry with `amctl users passwd NAME`.
+There are no preset passwords or automatic administrator permissions.
+
+```sh
+amctl users list
+amctl users show alice
+amctl users passwd alice           # root resets Alice's password
+amctl users passwd                 # a logged-in user changes their own password
+amctl users add bob --locked       # create without prompting (also supports --json)
+amctl users lock alice             # lock password login; active sessions continue
+amctl users unlock alice           # restore a previously set, locked password
+amctl users sync                   # retry sharing host accounts with running strata
+```
+
+Creation, password locking and explicit synchronization require root. Read-only
+inventory is available to ordinary users; it reports password status, never hashes.
+Password setup requires a terminal and refuses `--json` before changing anything.
+Rust code calls the existing `useradd`, `usermod` and PAM-aware `passwd` programs.
+Password text stays in the local, echo-disabled prompt; it is never an engine
+request or command argument. The development recorder logs terminal output only.
+
+The host owns these accounts. Creation reserves unused regular-user UID/GIDs
+across available configured Linux strata and refuses existing names or homes.
+Host account changes are merged into running strata with account database locks
+and permission-preserving replacement; other strata retain their service accounts.
+The engine also checks for changes every three seconds, covering a user's own
+password changes and native account tools. Busy/conflicting strata are reported
+in engine logs and retried; `amctl users sync` exposes an immediate retry.
+Stopped strata receive the host accounts when next started. Create users from
+the host console, rather than independently inside each stratum.
+
+Accounts and homes persist with the existing host overlay disk. A RAM-only root
+loses them on shutdown. This step does not add account deletion or group editing.
+
+The existing `agetty` and `login` programs use the packaged PAM `system-auth`
+policy for password/account checks. The **Rust** `pam_aftermath.so` session
+module then asks the engine to register the authenticated session. If that
+module or the engine is unavailable, session opening fails; the login terminal
+does not fall back to an unauthenticated root shell. Login terminals run
+outside the development console recorder, so it does not record password input.
+
+With elogind available, its PAM module owns `/run/user/<uid>` and seat/session
+lifetime; the engine validates and registers those directories without deleting
+them. In console-only images without elogind, the engine creates its own
+`/run/user/<uid>` owned by the user with mode 0700. PAM sets
+`XDG_RUNTIME_DIR`, `XDG_SESSION_ID`, `XDG_SESSION_TYPE=tty` and
+`XDG_SESSION_CLASS=user`; VT logins also get their VT number and a logical
+`seat0` label. This label grants no device control. Concurrent sessions for
+one UID share the directory. Final logout detaches it and deletes its contents
+in a Rust worker, without following symlinks. Dead PAM leaders are detected
+too. Root-owned ownership records allow recovery of Aftermath's stale runtime
+directories; unknown directories or replacements are refused rather than deleted.
+
+Use `amctl sessions list` or `amctl --json sessions list` to inspect sessions.
+The overview also counts sessions and users. Registration/closure are root-only
+PAM requests; the CLI does not expose a user-selectable authentication bypass.
+Configure terminals in `/etc/aftermath/aftermath.toml`:
+
+```toml
+[console]
+login_ttys = ["tty2"]       # [] disables extra login terminals
+```
+
+**This remains a development image:** the original root consoles remain on
+the boot consoles, normally tty1 and serial. Adding an authenticated terminal
+does not make the image suitable for unattended or multi-user deployment.
+Graphical sessions have a session-scoped D-Bus and elogind-managed seats,
+devices and session cleanup. A general per-user service manager and engine
+service cgroups are still missing. The Rust PAM
+module links dynamically to existing PAM/libc; PID 1 and the engine stay
+static. The build host needs PAM's link library (`pam` on Arch).
+
+The integration test is Rust on both host and guest:
+
+```sh
+cargo test --workspace
+cargo am smoke-sessions
+cargo am smoke-desktop
+cargo am smoke-desktop --grub       # include the default UEFI/OVMF → GRUB path
+```
+
+The smoke command boots a private RAM-only QEMU guest with current binaries,
+configuration and no saved VM disks. Its temporary account/helper are never
+installed into normal images. It checks account creation, private homes,
+interactive setup, a normal user's own password change, password locking/unlocking,
+duplicate/invalid-name rejection, secret-free output, wrong-password rejection, normal-user
+privileges, PAM environment, concurrent logins, shared runtime lifetime,
+unprivileged registration denial, final-logout cleanup and symlink handling.
+It also uses a private stratum account namespace to check ID reservation,
+database lock contention, synchronization retries and automatic password sharing.
+Credentials are not passed as command-line arguments or printed to the console.
+Artifacts live under `out/vm/session-smoke/`. Supervisor test child programs
+are also Rust, compiled once per test process with the host's Rust compiler.
+
+`smoke-desktop` builds and boots a private RAM-only graphical guest without the
+saved VM disks. It checks the temporary Bob/root passwords through PAM, drives
+the real SDDM greeter through QMP input, checks Plasma/KWin D-Bus ownership and
+Bob's privileges, then verifies logout/runtime cleanup and return to the greeter.
+Its logs and screenshots are under `out/vm/desktop-smoke`. `--grub` also tests
+the packaged GRUB disk through UEFI/OVMF; `--grub --bios` selects legacy firmware.
+
+The report lists compatibility limits separately from installed files:
+
+1. **Device seat access**: udev discovery and standalone elogind integration
+   supply session access. Test actual hardware and VT switching separately.
+2. **Per-user bus**: the default desktop has a private session bus. There is
+   no shared per-user service manager across unrelated login sessions.
+3. **Seats**: elogind supplies `org.freedesktop.login1`; the engine supervises
+   it and registers its authenticated PAM sessions.
+4. **Service lifecycle**: service cgroups, readiness notification and activation.
+5. **User sessions**: systemd unit interpretation and a per-user `systemd1`
+   manager for the desktop's unit jobs, environment and graphical-session targets.
+6. **Console handoff**: SDDM hands a VT to the desktop user. The graphical smoke
+   test checks login, logout and return to the greeter; fallback consoles remain.
+
+These distinguish the implemented desktop path from remaining compatibility
+work. Each desktop startup path has its own requirements.
+Plasma's exact requirements depend on its installed version and build; its
+[startup source](https://github.com/KDE/plasma-workspace/blob/v6.8.3/startkde/startplasma.cpp)
+uses session D-Bus and has systemd integration. The
+[login1 API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.login1.html)
+describes seat/session and device-control behavior that a replacement must
+provide. Aftermath integrates [elogind](https://github.com/elogind/elogind)
+as its standalone login1 provider.
+
+The private QEMU test covers rendered Plasma Wayland, input through SDDM,
+session permissions, D-Bus, login/logout and shutdown. Actual GPU hardware and
+VT switching need separate validation. Further integration includes portals,
+audio and network/power services as appropriate. The default desktop runs
+from the Arch host stratum; installing another desktop into Ubuntu/Fedora
+does not give it a separate seat or session manager.
 
 ## Keyboard layout (German by default)
 
@@ -659,7 +970,8 @@ aftermath_os/
 │   ├── aftermath-init/     PID 1: minimal supervisor + fallbacks; aftermath-early (persistent root)
 │   ├── aftermath-engine/   services, strata, control socket, keymap, boot success (allowed to fail)
 │   ├── aftermath-strata/   strata setup service + `strat` multicall launcher
-│   └── aftermath-ctl/      `amctl` + the shared control protocol, facts, service format, keymaps
+│   ├── aftermath-ctl/      `amctl` + the shared control protocol, facts, service format, keymaps
+│   └── aftermath-pam/      Rust PAM session module (shared library; existing PAM authentication)
 ├── config/
 │   ├── grub/themes/aftermath/theme.txt   GRUB theme (images + fonts are generated)
 │   ├── packages.x86_64     packages pacstrap installs into the rootfs
@@ -763,6 +1075,7 @@ cargo am --dry-run iso
 | `cargo am stratum ubuntu\|image\|list\|remove` | Build / list / remove strata and the strata disk `out/strata.img` (see *Strata*) | **yes** (except `list`) |
 | `cargo am reset-vm [--yes] [--keep-strata] [--keep-rootfs] [--logs]` | Wipes everything the VM changed and rebuilds a fresh VM (asks first) | **yes** |
 | `cargo am logs [-f tty1] [-b N] [--list]` | Prints the VM's session logs (every console + kernel log) from the strata disk | no |
+| `cargo am smoke-sessions` | Rust host/guest test of user management and authenticated PAM sessions in a private RAM-only QEMU guest | no (initial kernel/initramfs must exist) |
 | `cargo am clean` | Deletes generated files in `out/` | only with `--rootfs`/`--strata`/`--all` |
 
 Examples:
@@ -782,8 +1095,9 @@ cargo am rootfs -p vim -p htop      # extra packages this time
 #   permanent extras: add them to config/packages.x86_64, then --force
 
 # Boot in QEMU through GRUB (the themed "Aftermath OS" menu)
-cargo am run                        # window (GTK), BIOS, 4G RAM, 4 CPUs, KVM
-cargo am run --uefi                 # same with UEFI (adds "UEFI Firmware Settings")
+cargo am run                        # window (GTK), UEFI/OVMF, 8G RAM, 4 CPUs, KVM
+cargo am run --uefi                 # explicit UEFI (already the default)
+cargo am run --bios                 # legacy firmware; large images may exceed loader limits
 cargo am run --direct               # skip GRUB: QEMU loads kernel + initramfs (fastest)
 cargo am run --direct --debug       # + earlyprintk, ignore_loglevel, loglevel=8
 cargo am run --headless             # no window, only the serial log (for test boots)
@@ -799,7 +1113,7 @@ cargo am run -- -s -S               # anything after -- goes to QEMU (here: wait
 # ISO
 cargo am iso                        # -> out/aftermath-0.1.0-x86_64.iso
 cargo am run --iso                  # boot the ISO like real hardware
-cargo am run --iso --uefi           # ... with UEFI
+cargo am run --iso --bios           # ... with legacy firmware
 
 # Cleaning
 cargo am clean                      # initramfs, ISO, staging (keeps kernel + rootfs)
@@ -860,10 +1174,12 @@ sudo dd if=out/aftermath-0.1.0-x86_64.iso of=/dev/sdX bs=4M status=progress ofla
 
 ## Next steps
 
-- **Init**: services exist now (TOML, needs/after, restart, logs, `amctl`);
-  next: cgroup per service, readiness notification, proper getty/login
-  instead of the root shell, udev replacement or eudev, then a D-Bus layer
-  implementing logind/systemd1 for Plasma (as an amctl subsystem).
+- **Init / desktops**: services exist now (TOML, needs/after, restart, logs,
+  `amctl`), and `amctl desktop check` reports installation and engine gaps.
+  The default source-built Plasma has graphical login, a session bus, Rust PAM
+  registration and elogind seat/device control. Next, one step at a time:
+  service cgroups/readiness and the general user-session/systemd compatibility
+  layer. See *Default Plasma desktop and device discovery* above.
 - **Boot layout**: squashfs image as the overlay's lower layer (today the
   lower layer is the RAM initramfs), so RAM use no longer equals the rootfs
   size; then an installer.

@@ -66,6 +66,9 @@ pub struct ResetArgs {
     /// Size of the new host overlay disk.
     #[arg(long, default_value = DEFAULT_SIZE)]
     pub overlay_size: String,
+    /// Build the reset VM without opening its QEMU window afterwards.
+    #[arg(long)]
+    pub no_run: bool,
 }
 
 pub fn reset_vm(ctx: &Ctx, a: &ResetArgs) -> Result<()> {
@@ -106,6 +109,13 @@ pub fn reset_vm(ctx: &Ctx, a: &ResetArgs) -> Result<()> {
     } else if !a.yes && !confirm("Continue? [y/N] ")? {
         println!("aborted, nothing changed");
         return Ok(());
+    }
+
+    // Compile before deleting saved VM data. Missing dependencies or a failed
+    // local Plasma build must not destroy an otherwise usable VM.
+    image::ensure_kernel(ctx)?;
+    if crate::plasma::enabled(ctx)? {
+        crate::plasma::ensure(ctx)?;
     }
 
     // 1. Save the session logs before the strata disk goes away.
@@ -151,6 +161,8 @@ pub fn reset_vm(ctx: &Ctx, a: &ResetArgs) -> Result<()> {
                 ..Default::default()
             },
         )?;
+    } else {
+        image::ensure_rootfs(ctx)?;
     }
     image::initramfs(ctx)?;
     grub::build_tree(ctx)?;
@@ -158,7 +170,11 @@ pub fn reset_vm(ctx: &Ctx, a: &ResetArgs) -> Result<()> {
 
     // 5. Empty overlay disk.
     ensure_host_overlay(ctx, &a.overlay_size)?;
-    println!("\nfresh VM ready: `cargo am run`");
+    if a.no_run {
+        println!("\nfresh VM ready: `cargo am run`");
+    } else {
+        crate::qemu::run_default(ctx)?;
+    }
     Ok(())
 }
 

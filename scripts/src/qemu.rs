@@ -1,7 +1,7 @@
 //! `cargo am run` / `cargo am qemu`: boot Aftermath in QEMU.
 //!
 //! Three ways to boot:
-//! * default:   the GRUB disk image (out/aftermath-<ver>-x86_64.img), BIOS or UEFI
+//! * default:   the GRUB disk image (out/aftermath-<ver>-x86_64.img) through UEFI
 //! * --direct:  QEMU loads kernel + initramfs itself (fastest, no GRUB)
 //! * --iso:     the ISO as a CD-ROM, like real hardware
 //!
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Result};
-use clap::Args;
+use clap::{Args, FromArgMatches};
 
 use crate::ctx::Ctx;
 use crate::deps::{OVMF_CODE, OVMF_VARS};
@@ -33,11 +33,15 @@ pub struct RunArgs {
     /// Boot the packaged ISO as a CD-ROM instead of the GRUB disk image.
     #[arg(long)]
     pub iso: bool,
-    /// Boot with UEFI firmware (OVMF) instead of legacy BIOS.
-    #[arg(long)]
+    /// Use UEFI firmware (the default for normal disk/ISO boots).
+    #[arg(long, conflicts_with = "bios")]
     pub uefi: bool,
-    /// Guest RAM. The whole rootfs lives in RAM, so keep this >= 2G.
-    #[arg(long, short, default_value = "4G")]
+    /// Use legacy BIOS instead of the default UEFI firmware.
+    /// Large desktop initramfs images may exceed the BIOS loader's limits.
+    #[arg(long, conflicts_with = "uefi")]
+    pub bios: bool,
+    /// Guest RAM. The Plasma rootfs and desktop live in RAM; use at least 8G.
+    #[arg(long, short, default_value = "8G")]
     pub mem: String,
     /// Number of virtual CPUs.
     #[arg(long, short, default_value_t = 4)]
@@ -119,7 +123,7 @@ pub fn run(ctx: &Ctx, a: &RunArgs) -> Result<()> {
         q.args(["-cpu", "max"]);
     }
 
-    if a.uefi {
+    if uses_uefi(a) {
         let code = first_existing(OVMF_CODE)
             .ok_or_else(|| anyhow::anyhow!("OVMF not found; install edk2-ovmf"))?;
         let vars_src = first_existing(OVMF_VARS)
@@ -257,6 +261,16 @@ pub fn run(ctx: &Ctx, a: &RunArgs) -> Result<()> {
     ctx.run(&mut q)
 }
 
+pub fn run_default(ctx: &Ctx) -> Result<()> {
+    let matches = RunArgs::augment_args(clap::Command::new("run"))
+        .try_get_matches_from(["run", "--no-build"])?;
+    run(ctx, &RunArgs::from_arg_matches(&matches)?)
+}
+
+fn uses_uefi(args: &RunArgs) -> bool {
+    args.uefi || (!args.bios && !args.direct)
+}
+
 /// out/vm/logs/<YYYY-mm-dd_HH-MM-SS>.log, and point out/vm/serial.log at it.
 fn new_log(ctx: &Ctx) -> Result<PathBuf> {
     let logs = ctx.vm_dir().join("logs");
@@ -287,4 +301,30 @@ fn require(ctx: &Ctx, p: &Path) -> Result<()> {
 
 fn first_existing(cands: &[&'static str]) -> Option<&'static str> {
     cands.iter().copied().find(|p| Path::new(p).exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> RunArgs {
+        let matches = RunArgs::augment_args(clap::Command::new("run"))
+            .try_get_matches_from(args)
+            .unwrap();
+        RunArgs::from_arg_matches(&matches).unwrap()
+    }
+
+    #[test]
+    fn desktop_boot_defaults_to_uefi_with_explicit_bios_fallback() {
+        let default = parse(&["run"]);
+        assert!(uses_uefi(&default));
+        assert_eq!(default.mem, "8G");
+        assert!(uses_uefi(&parse(&["run", "--iso"])));
+        assert!(!uses_uefi(&parse(&["run", "--bios"])));
+        assert!(!uses_uefi(&parse(&["run", "--direct"])));
+        assert!(uses_uefi(&parse(&["run", "--direct", "--uefi"])));
+        assert!(RunArgs::augment_args(clap::Command::new("run"))
+            .try_get_matches_from(["run", "--bios", "--uefi"])
+            .is_err());
+    }
 }
