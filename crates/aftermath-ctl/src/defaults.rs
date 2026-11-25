@@ -182,17 +182,19 @@ fn refresh_launchers() -> String {
     }
 }
 
-/// A hint when the chosen stratum can't run `cmd` right now.
+/// A hint when the chosen stratum can't run `cmd` right now. Like the
+/// launchers, this goes by what is running, not by the boot switches.
 fn availability_note(cfg: &Config, cmd: &str, stratum: &str) -> Option<String> {
     let s = cfg.get(stratum)?;
-    let host = s.kind == "host";
+    let live = cfg.with_running(&status::up());
+    let running = live.get(stratum).is_some_and(|l| l.enabled);
 
-    if !host && !s.enabled {
+    if !running && !s.enabled {
         return Some(format!(
-            "`{stratum}` is disabled: until it is enabled, the usual rules apply"
+            "`{stratum}` is disabled: the default applies once it is started or enabled"
         ));
     }
-    if !host && !status::up().contains(&s.name) {
+    if !running {
         return Some(format!(
             "`{stratum}` is not running: the default applies once it is up"
         ));
@@ -202,7 +204,7 @@ fn availability_note(cfg: &Config, cmd: &str, stratum: &str) -> Option<String> {
     if copies.is_empty() {
         let hint = format!(
             "`{stratum}` has no `{cmd}`: until it does, the usual rules apply \
-             (install it, e.g. `strat {stratum} apt install ...`)"
+             (install it with that stratum's package manager)"
         );
         return Some(hint);
     }

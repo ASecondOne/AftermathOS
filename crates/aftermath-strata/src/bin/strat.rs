@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use aftermath_strata::config::Config;
 use aftermath_strata::cross::{decide, lookup_index, Action};
-use aftermath_strata::{at, status, which, CONFIG, CROSS_DIR, STRATUM_PATH};
+use aftermath_strata::{at, status, which, CROSS_DIR, STRATUM_PATH};
 
 const USAGE: &str = "\
 usage: strat <stratum> <command> [args...]   run a command in a stratum
@@ -82,8 +82,14 @@ fn run(stratum: &str, cmd: &str, args: &[String]) -> ! {
             &format!("unknown stratum `{stratum}` (see strat --list)"),
         )
     });
-    if !s.enabled {
-        die(1, &format!("stratum `{stratum}` is disabled in {CONFIG}"));
+    // A stratum started at runtime (`amctl strata start`) is usable even if
+    // it is off at boot, like its launchers (`Config::with_running`).
+    let running = status::up().contains(&s.name);
+    if !s.enabled && !running {
+        die(
+            1,
+            &format!("stratum `{stratum}` is disabled (start it: amctl strata start {stratum})"),
+        );
     }
 
     if s.kind == "host" {

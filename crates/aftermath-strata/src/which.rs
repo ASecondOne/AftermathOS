@@ -66,19 +66,21 @@ impl Report {
 }
 
 /// Build the report. `up` are the guest strata that are running.
+///
+/// What counts is what runs *now*: a stratum started at runtime but not
+/// (yet) enabled at boot is searched too, exactly like the launchers do
+/// (`Config::with_running`).
 pub fn report(cfg: &Config, up: &[String], index: &str, cmd: &str) -> Report {
+    let live = cfg.with_running(up);
     let mut copies = Vec::new();
     let mut not_checked = Vec::new();
 
     for s in &cfg.stratum {
-        let host = s.kind == "host";
+        let running = s.kind == "host" || up.contains(&s.name);
 
-        if !host && !s.enabled {
-            not_checked.push(skipped(&s.name, "disabled"));
-            continue;
-        }
-        if !host && !up.contains(&s.name) {
-            not_checked.push(skipped(&s.name, "not running"));
+        if !running {
+            let why = if s.enabled { "not running" } else { "disabled" };
+            not_checked.push(skipped(&s.name, why));
             continue;
         }
 
@@ -96,7 +98,7 @@ pub fn report(cfg: &Config, up: &[String], index: &str, cmd: &str) -> Report {
 
     Report {
         cmd: cmd.to_owned(),
-        resolution: explain(cfg, &providers, cmd),
+        resolution: explain(&live, &providers, cmd),
         launcher: lookup_index(index, cmd),
         copies,
         not_checked,
@@ -236,6 +238,35 @@ mod tests {
         symlink("a", root.join("usr/bin/b")).unwrap();
 
         assert_eq!(resolve_in_root(&root, "/usr/bin/a"), None);
+    }
+
+    #[test]
+    fn a_running_stratum_counts_even_if_not_enabled_at_boot() {
+        let dir = scratch("live");
+        touch(&dir.join("arch/usr/bin/bash"));
+        touch(&dir.join("fedora/usr/bin/dnf"));
+
+        let toml = format!(
+            "[[stratum]]\nname = \"arch\"\npath = \"{arch}\"\nkind = \"host\"\nenabled = true\n\n\
+             [[stratum]]\nname = \"fedora\"\npath = \"{fedora}\"\nkind = \"fedora\"\nenabled = false\n",
+            arch = dir.join("arch").display(),
+            fedora = dir.join("fedora").display(),
+        );
+        let cfg = Config::parse(&toml).unwrap();
+        let index = "dnf fedora\n";
+
+        // Started with `amctl strata start fedora`, not enabled at boot.
+        let running = report(&cfg, &["fedora".into()], index, "dnf");
+        assert_eq!(running.copies.len(), 1);
+        let winner = running.resolution.choice.as_ref().unwrap();
+        assert_eq!(winner.stratum, "fedora");
+        assert!(!running.stale(&cfg), "matches the launcher");
+        assert!(running.not_checked.is_empty());
+
+        // Not running: skipped, and called disabled.
+        let stopped = report(&cfg, &[], "", "dnf");
+        assert!(stopped.copies.is_empty());
+        assert_eq!(stopped.not_checked[0].why, "disabled");
     }
 
     #[test]

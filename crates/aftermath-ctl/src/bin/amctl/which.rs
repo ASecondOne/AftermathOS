@@ -106,7 +106,7 @@ fn print_which(st: &Style, v: &Value) {
 
     for p in items(v, "passed_over") {
         let line = format!(
-            "{} points to {}, which has no `{cmd}`",
+            "{} points to {}, which has no `{cmd}` right now (or is not running)",
             text(p, "why"),
             text(p, "stratum")
         );
