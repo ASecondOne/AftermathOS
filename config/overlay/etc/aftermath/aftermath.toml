@@ -2,6 +2,8 @@
 
 [desktop]
 enabled = true
+# Distribution Plasma packages by default; enable for local Plasma changes.
+source_build = false
 # Temporary development defaults requested for fresh images: bob/bob, root/bob.
 # Applied once to a fresh host root; normal reboots preserve changed passwords.
 development_accounts = true

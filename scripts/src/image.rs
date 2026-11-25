@@ -191,6 +191,7 @@ pub fn ensure_initramfs(ctx: &Ctx) -> Result<()> {
         newest_mtime(&grub::tree(ctx)),
         mtime(&ctx.kernel_image()),
         mtime(&ctx.out.join("plasma/built")),
+        mtime(&ctx.out.join("plasma/elogind-built")),
         mtime(&ctx.root.join("scripts/src/live_image.rs")),
     ];
     if is_stale(&ctx.initramfs(), &inputs) || is_stale(&ctx.root_image(), &inputs) {
@@ -211,6 +212,7 @@ fn pack_initramfs(ctx: &Ctx, init: &Path) -> Result<()> {
         bail!("no rootfs yet, run `cargo am rootfs` first (uses sudo pacstrap)");
     }
     let rootfs = ctx.rootfs();
+    reconcile_plasma_packages(ctx)?;
     grub::ensure_tree(ctx)?;
 
     // 1. Stage everything Aftermath adds in a user-owned dir...
@@ -247,6 +249,8 @@ fn pack_initramfs(ctx: &Ctx, init: &Path) -> Result<()> {
             "strat",
             "aftermath-early",
             "aftermath-desktop-session",
+            "aftermath-desktop-defaults",
+            "aftermath-greeter",
         ] {
             let src = init.with_file_name(name);
             fs::copy(&src, lib.join(name)).with_context(|| format!("copy {}", src.display()))?;
@@ -332,6 +336,37 @@ fn pack_initramfs(ctx: &Ctx, init: &Path) -> Result<()> {
 
     // 4. Keep desktop data on disk and build an independent rescue bootstrap.
     crate::live_image::build(ctx, &rootfs, init, true)
+}
+
+/// Restore packaged files once when switching away from a source installation.
+fn reconcile_plasma_packages(ctx: &Ctx) -> Result<()> {
+    if !crate::plasma::enabled(ctx)? {
+        return Ok(());
+    }
+    let stamp = ctx.out.join("rootfs-plasma-mode");
+    let mode = if crate::plasma::source_build(ctx)? {
+        "source"
+    } else {
+        "packaged"
+    };
+    if mode == "packaged" && fs::read_to_string(&stamp).ok().as_deref() != Some(mode) {
+        let mut command = sudo(["pacstrap", "-c", "-C"]);
+        command
+            .arg(ctx.config().join("pacman.conf"))
+            .arg(ctx.rootfs())
+            .args([
+                "libplasma",
+                "kwin",
+                "breeze",
+                "plasma-workspace",
+                "plasma-desktop",
+            ]);
+        ctx.run(&mut command)?;
+    }
+    if !ctx.dry_run {
+        fs::write(stamp, mode)?;
+    }
+    Ok(())
 }
 
 /// Recursively copy a user-owned tree (files, dirs, symlinks).

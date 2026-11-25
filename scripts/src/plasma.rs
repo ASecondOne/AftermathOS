@@ -97,6 +97,9 @@ fn logged(ctx: &Ctx, command: &mut Command, name: &str) -> Result<()> {
 }
 
 pub fn ensure(ctx: &Ctx) -> Result<PathBuf> {
+    if !source_build(ctx)? {
+        return ensure_elogind(ctx);
+    }
     let stamp = ctx.out.join("plasma/built");
     let mut inputs = vec![
         mtime(&ctx.root.join("scripts/src/plasma.rs")),
@@ -116,21 +119,54 @@ pub fn ensure(ctx: &Ctx) -> Result<PathBuf> {
     build(ctx)
 }
 
+/// Source builds are explicit; repository checkouts remain available for edits.
+pub fn source_build(ctx: &Ctx) -> Result<bool> {
+    let text = fs::read_to_string(ctx.config().join("overlay/etc/aftermath/aftermath.toml"))?;
+    Ok(aftermath_ctl::graphical::parse(&text)
+        .map_err(anyhow::Error::msg)?
+        .source_build)
+}
+
+/// Stage only the pinned login1 provider when using packaged Plasma.
+fn ensure_elogind(ctx: &Ctx) -> Result<PathBuf> {
+    let dest = ctx.out.join("plasma/elogind-stage");
+    let stamp = ctx.out.join("plasma/elogind-built");
+    if !is_stale(&stamp, &[mtime(&ctx.root.join("scripts/src/plasma.rs"))])
+        && dest.join("usr/lib/elogind/elogind").is_file()
+    {
+        return Ok(dest);
+    }
+    ctx.mkdir(&ctx.out.join("plasma"))?;
+    let _lock = build_lock(ctx)?;
+    ctx.remove(&dest)?;
+    ctx.mkdir(&dest)?;
+    let jobs = std::thread::available_parallelism().map_or(4, |n| n.get().min(16));
+    build_elogind(ctx, &dest, jobs)?;
+    if !ctx.dry_run {
+        fs::write(stamp, "pinned elogind v257.16\n")?;
+    }
+    Ok(dest)
+}
+
+/// Serialize source installs sharing the build directory.
+fn build_lock(ctx: &Ctx) -> Result<Option<File>> {
+    if ctx.dry_run {
+        return Ok(None);
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(ctx.out.join("plasma/build.lock"))?;
+    file.try_lock()
+        .context("another Plasma build is using out/plasma")?;
+    Ok(Some(file))
+}
+
 pub fn build(ctx: &Ctx) -> Result<PathBuf> {
     ctx.mkdir(&ctx.out.join("plasma"))?;
-    let _lock = if ctx.dry_run {
-        None
-    } else {
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(ctx.out.join("plasma/build.lock"))?;
-        file.try_lock()
-            .context("another Plasma build is already using out/plasma")?;
-        Some(file)
-    };
+    let _lock = build_lock(ctx)?;
     for module in MODULES {
         if !ctx
             .root
