@@ -1,4 +1,5 @@
-//! /etc/aftermath/strata.toml
+//! /etc/aftermath/strata.toml, plus the runtime switches (state.toml) and
+//! the user's command defaults (strata.d/user.toml) layered on top.
 
 use std::collections::BTreeMap;
 
@@ -10,6 +11,9 @@ pub struct Config {
     pub stratum: Vec<Stratum>,
     #[serde(default)]
     pub cross: Cross,
+    /// The user's defaults from strata.d/user.toml (not part of strata.toml).
+    #[serde(skip)]
+    pub user: crate::defaults::UserDefaults,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -58,6 +62,22 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Everything that decides who runs what, as the running system sees
+    /// it: strata.toml, state.toml and strata.d/user.toml. A broken
+    /// user.toml is ignored with a warning (plan B: the shipped rules).
+    pub fn load_system() -> Result<Self, String> {
+        use crate::defaults::{UserDefaults, USER_DEFAULTS};
+
+        let mut cfg =
+            Self::load_with_state(&crate::at(crate::CONFIG), &crate::at(crate::state::STATE))?;
+
+        match UserDefaults::load(&crate::at(USER_DEFAULTS)) {
+            Ok(user) => cfg.user = user,
+            Err(e) => eprintln!("aftermath: ignoring {e}"),
+        }
+        Ok(cfg)
+    }
+
     pub fn apply_state(&mut self, st: &crate::state::State) {
         for s in &mut self.stratum {
             if s.kind == "host" {
@@ -89,21 +109,38 @@ impl Config {
             .filter(|s| s.enabled && s.kind != "host")
     }
 
-    /// Effective lookup order (only enabled strata).
+    /// Effective lookup order (only enabled strata). The user's order
+    /// (`amctl default order`) comes first; enabled strata it leaves out
+    /// keep their usual place after it, so none is lost by accident.
     pub fn order(&self) -> Vec<String> {
         let enabled = |n: &String| self.stratum.iter().any(|s| &s.name == n && s.enabled);
-        if !self.cross.order.is_empty() {
-            return self
-                .cross
+
+        let shipped: Vec<String> = if self.cross.order.is_empty() {
+            let mut v = vec![self.host_name().to_owned()];
+            v.extend(self.guests().map(|s| s.name.clone()));
+            v
+        } else {
+            self.cross
                 .order
                 .iter()
                 .filter(|n| enabled(n))
                 .cloned()
-                .collect();
+                .collect()
+        };
+
+        let mut order: Vec<String> = self
+            .user
+            .order
+            .iter()
+            .filter(|n| enabled(n))
+            .cloned()
+            .collect();
+        for name in shipped {
+            if !order.contains(&name) {
+                order.push(name);
+            }
         }
-        let mut v = vec![self.host_name().to_owned()];
-        v.extend(self.guests().map(|s| s.name.clone()));
-        v
+        order
     }
 }
 
@@ -154,6 +191,13 @@ pacman = "arch"
         assert!(!c.get("ubuntu").unwrap().enabled);
         assert!(c.get("windows").unwrap().enabled);
         assert!(c.get("arch").unwrap().enabled);
+    }
+
+    #[test]
+    fn user_order_comes_first_and_keeps_the_rest() {
+        let mut c = Config::parse(CFG).unwrap();
+        c.user.order = vec!["ubuntu".into(), "windows".into()];
+        assert_eq!(c.order(), vec!["ubuntu", "arch"]);
     }
 
     #[test]

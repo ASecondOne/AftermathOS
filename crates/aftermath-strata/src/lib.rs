@@ -4,8 +4,11 @@
 
 pub mod config;
 pub mod cross;
+pub mod defaults;
 pub mod state;
+pub mod status;
 pub mod users;
+pub mod which;
 
 use std::path::PathBuf;
 
@@ -15,6 +18,15 @@ pub const CROSS_DIR: &str = "/aftermath/cross";
 pub const STRAT_BIN: &str = "/usr/lib/aftermath/strat";
 pub const CONFIG: &str = "/etc/aftermath/strata.toml";
 /// PATH used for programs running inside a (non-host) stratum.
+/// Where commands live inside every stratum, in PATH order.
+pub const BIN_DIRS: [&str; 6] = [
+    "usr/local/sbin",
+    "usr/local/bin",
+    "usr/sbin",
+    "usr/bin",
+    "sbin",
+    "bin",
+];
 pub const STRATUM_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// Test/development prefix: `AFTERMATH_PREFIX=/tmp/x` makes every Aftermath

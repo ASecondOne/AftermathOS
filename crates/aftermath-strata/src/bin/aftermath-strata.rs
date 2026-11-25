@@ -29,22 +29,12 @@ use nix::mount::{mount, MsFlags};
 
 use aftermath_strata::config::{Config, Stratum};
 use aftermath_strata::cross::{self, Providers, Slot};
-use aftermath_strata::state::STATE;
-use aftermath_strata::{at, users, CONFIG, CROSS_DIR, STRAT_BIN};
-
-const STATUS: &str = "/run/aftermath/strata";
+use aftermath_strata::status::STATUS;
+use aftermath_strata::{at, users, BIN_DIRS, CONFIG, CROSS_DIR, STRAT_BIN};
 
 pub const DISK_LABEL: &str = "AFTERMATH_STRATA";
 const SHARED_KERNEL: [&str; 3] = ["proc", "sys", "dev"];
 const SHARED_DIRS: [&str; 4] = ["run", "tmp", "home", "root"];
-const BIN_DIRS: [&str; 6] = [
-    "usr/local/sbin",
-    "usr/local/bin",
-    "usr/sbin",
-    "usr/bin",
-    "sbin",
-    "bin",
-];
 
 fn log_at(level: u8, msg: &str) {
     let line = format!("<{level}>aftermath-strata: {msg}\n");
@@ -121,8 +111,9 @@ fn fail(msg: &str) -> ! {
     std::process::exit(1)
 }
 
+/// strata.toml + state.toml switches + the user's defaults (user.toml).
 fn load_config() -> Result<Config, String> {
-    Config::load_with_state(&at(CONFIG), &at(STATE))
+    Config::load_system()
 }
 
 /// Strata disk on /aftermath/store, the pacman cache on it, and the

@@ -127,6 +127,11 @@ fn spawn(tty: &str, mode: &str, log_dir: Option<&Path>) -> Option<i32> {
             "XDG_DATA_DIRS",
             "/usr/local/share:/usr/share:/aftermath/cross/share",
         );
+        // bash remembers where it found a command (`hash`). Forget that
+        // before every prompt, so `amctl default` and new launchers take
+        // effect in shells that are already open. Exported, so nested
+        // shells get it too; Arch's bash.bashrc only appends to it.
+        cmd.env("PROMPT_COMMAND", "hash -r");
     }
     // SAFETY: only async-signal-safe libc calls between fork and exec.
     unsafe {

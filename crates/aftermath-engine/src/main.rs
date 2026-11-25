@@ -166,6 +166,7 @@ fn main() {
         subsystems: vec![
             Box::new(subsystems::System),
             Box::new(subsystems::Strata),
+            Box::new(subsystems::Defaults),
             Box::new(svc),
             Box::new(subsystems::Boot),
             Box::new(subsystems::Overlay),

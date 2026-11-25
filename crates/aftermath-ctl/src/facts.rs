@@ -158,12 +158,9 @@ pub fn os_name(root: &Path) -> Option<String> {
         })
 }
 
-/// strata.toml with the state.toml switches applied.
+/// strata.toml with the state.toml switches and the user's defaults.
 pub fn load_cfg() -> Result<aftermath_strata::config::Config, String> {
-    aftermath_strata::config::Config::load_with_state(
-        Path::new(aftermath_strata::CONFIG),
-        Path::new(aftermath_strata::state::STATE),
-    )
+    aftermath_strata::config::Config::load_system()
 }
 
 /// One stratum as amctl shows it (config + live state).

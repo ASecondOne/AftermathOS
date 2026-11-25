@@ -5,7 +5,7 @@
 //! ask (status, lists, logs); changing things needs root. If the engine or
 //! its socket is not there (BusyBox rescue, engine crashed), amctl says so
 //! and does what it can by itself: status from /proc and /run, logs, boot
-//! next, overlay reset, keymap, and poweroff/reboot via PID 1 or the reboot
+//! next, overlay reset, keymap, which/default, and poweroff/reboot via PID 1 or the reboot
 //! syscall (plan B).
 //!
 //! Layout: `cli` (the commands), `output` (engine calls, colours, JSON),
@@ -18,6 +18,7 @@ mod services;
 mod status;
 mod strata;
 mod system;
+mod which;
 
 use std::process::ExitCode;
 
@@ -54,6 +55,8 @@ fn run(cx: &Ctx, cmd: Cmd) -> Result<(), String> {
         Cmd::Strata(c) => strata::run(cx, c),
         Cmd::Services(c) => services::run(cx, c),
         Cmd::Logs(args) => logs::run(cx, args),
+        Cmd::Which { cmd } => which::which(cx, &cmd),
+        Cmd::Default(args) => which::default(cx, args),
 
         Cmd::Poweroff => system::power(cx, "poweroff"),
         Cmd::Reboot => system::power(cx, "reboot"),

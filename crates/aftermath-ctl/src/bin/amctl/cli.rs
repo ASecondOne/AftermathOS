@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
     version,
     about = "Aftermath control: status, strata, services, logs, boot and power",
     after_help = "Examples:\n  amctl status\n  amctl strata list\n  amctl strata enter ubuntu\n  \
+                  amctl which vim\n  amctl default vim ubuntu\n  \
                   amctl services restart heartbeat\n  amctl logs -f --service heartbeat\n  \
                   amctl boot next host\n  amctl overlay reset"
 )]
@@ -34,6 +35,14 @@ pub enum Cmd {
     /// Services from /etc/aftermath/services/*.toml
     #[command(subcommand, visible_alias = "svc")]
     Services(SvcCmd),
+    /// Every copy of a command across the strata, and which one wins (and why)
+    Which {
+        /// Command name, e.g. vim
+        cmd: String,
+    },
+    /// Choose which stratum runs a command: `amctl default vim ubuntu`,
+    /// `amctl default vim --reset`, `amctl default list`, `amctl default order ...`
+    Default(DefaultArgs),
     /// Session logs of this boot (consoles, kernel, services)
     Logs(LogsArgs),
     /// Power off cleanly
@@ -162,4 +171,32 @@ pub struct LogsArgs {
     /// List the log files of this boot
     #[arg(long)]
     pub list: bool,
+}
+
+/// `amctl default <cmd> <stratum>` / `<cmd> --reset`, or a subcommand.
+#[derive(clap::Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+pub struct DefaultArgs {
+    #[command(subcommand)]
+    pub sub: Option<DefaultSub>,
+    /// Command name, e.g. vim
+    pub cmd: Option<String>,
+    /// Stratum that should run it, e.g. ubuntu
+    pub stratum: Option<String>,
+    /// Forget your default for <cmd>: the shipped rules apply again
+    #[arg(long, conflicts_with = "stratum")]
+    pub reset: bool,
+}
+
+#[derive(Subcommand)]
+pub enum DefaultSub {
+    /// Your defaults, the lookup order and the shipped pins
+    List,
+    /// Lookup order for commands nothing pins, e.g. `ubuntu arch`
+    Order {
+        strata: Vec<String>,
+        /// Back to the order in /etc/aftermath/strata.toml
+        #[arg(long, conflicts_with = "strata")]
+        reset: bool,
+    },
 }

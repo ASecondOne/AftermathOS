@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use aftermath_ctl::{facts, grubenv, locale, overlay, STRATA_SERVICE};
+use aftermath_ctl::{defaults, facts, grubenv, locale, overlay, STRATA_SERVICE};
 use aftermath_strata::state::{State as Switches, STATE};
 use aftermath_strata::CONFIG;
 use nix::sys::signal::{kill, Signal};
@@ -137,6 +137,57 @@ impl Subsystem for Strata {
                 stratum_json(&load_cfg()?, &name)
             }
             other => Err(format!("unknown verb `strata {other}`")),
+        }
+    }
+}
+
+// ----------------------------------------------------------- default ----
+
+/// `amctl which` / `amctl default`: which stratum runs a command. The work
+/// is in aftermath_ctl::defaults, which amctl also uses offline.
+pub struct Defaults;
+
+impl Subsystem for Defaults {
+    fn name(&self) -> &'static str {
+        "default"
+    }
+
+    fn about(&self) -> &'static str {
+        "which stratum runs a command (list, which, set, reset, order)"
+    }
+
+    fn queries(&self) -> &'static [&'static str] {
+        &["list", "which"]
+    }
+
+    fn call(&mut self, verb: &str, args: &[String]) -> Result<Value, String> {
+        match verb {
+            "list" => defaults::list(),
+            "which" => defaults::which(&need_arg(args, "a command name")?),
+
+            "set" => {
+                let [cmd, stratum] = args else {
+                    return Err("needs a command and a stratum".into());
+                };
+                let reply = defaults::set(cmd, stratum)?;
+                crate::log(&format!("default for `{cmd}`: {stratum} (via amctl)"));
+                Ok(reply)
+            }
+
+            "reset" => {
+                let cmd = need_arg(args, "a command name")?;
+                let reply = defaults::reset(&cmd)?;
+                crate::log(&format!("default for `{cmd}` reset (via amctl)"));
+                Ok(reply)
+            }
+
+            "order" => {
+                let reply = defaults::set_order(args)?;
+                crate::log(&format!("lookup order set to {:?} (via amctl)", args));
+                Ok(reply)
+            }
+
+            other => Err(format!("unknown verb `default {other}`")),
         }
     }
 }

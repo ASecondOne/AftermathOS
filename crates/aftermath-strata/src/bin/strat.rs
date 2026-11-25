@@ -21,12 +21,13 @@ use std::path::{Path, PathBuf};
 
 use aftermath_strata::config::Config;
 use aftermath_strata::cross::{decide, lookup_index, Action};
-use aftermath_strata::{at, CONFIG, CROSS_DIR, STRATUM_PATH};
+use aftermath_strata::{at, status, which, CONFIG, CROSS_DIR, STRATUM_PATH};
 
 const USAGE: &str = "\
 usage: strat <stratum> <command> [args...]   run a command in a stratum
        strat --list                          list strata
        strat --which <command>               which stratum runs <command>
+       strat --which -a <command>            every copy, and which one wins (and why)
 Cross launchers in /aftermath/cross/{pin,bin} call strat automatically.";
 
 fn die(code: i32, msg: &str) -> ! {
@@ -34,8 +35,9 @@ fn die(code: i32, msg: &str) -> ! {
     std::process::exit(code)
 }
 
+/// strata.toml with the runtime switches and the user's defaults.
 fn config() -> Config {
-    Config::load(&at(CONFIG)).unwrap_or_else(|e| die(1, &e))
+    Config::load_system().unwrap_or_else(|e| die(1, &e))
 }
 
 fn index() -> String {
@@ -183,6 +185,7 @@ fn main() {
                 }
             }
         },
+        Action::WhichAll(cmd) => which_all(&cmd),
         Action::Run { stratum, cmd, args } => run_maybe_refresh(&stratum, &cmd, &args),
         Action::Launcher { cmd, args } => {
             let stratum = lookup_index(&index(), &cmd).unwrap_or_else(|| {
@@ -193,6 +196,44 @@ fn main() {
             });
             run_maybe_refresh(&stratum, &cmd, &args)
         }
+    }
+}
+
+/// `strat --which -a <cmd>`: one line per copy, the winner marked `*`,
+/// then why it wins. Exit status 1 if no stratum has it.
+fn which_all(cmd: &str) {
+    let cfg = config();
+    let report = which::report(&cfg, &status::up(), &index(), cmd);
+
+    if report.copies.is_empty() {
+        die(1, &format!("{cmd}: not provided by any running stratum"));
+    }
+
+    let runs_in = report.runs_in(&cfg);
+    for copy in &report.copies {
+        let wins = copy.first && runs_in.as_deref() == Some(copy.stratum.as_str());
+        let marker = if wins { '*' } else { ' ' };
+
+        let mut line = format!("{marker} {:<9} {}", copy.stratum, copy.path);
+        if copy.real != copy.path {
+            line.push_str(&format!(" -> {}", copy.real));
+        }
+        if !copy.first {
+            line.push_str("  (shadowed in its stratum)");
+        }
+        println!("{line}");
+    }
+
+    if let Some(choice) = &report.resolution.choice {
+        println!("wins: {} ({})", choice.stratum, choice.reason.describe(cmd));
+    }
+    for skipped in &report.not_checked {
+        println!("not checked: {} ({})", skipped.stratum, skipped.why);
+    }
+    if report.stale(&cfg) {
+        println!(
+            "note: launchers are out of date; run /usr/lib/aftermath/aftermath-strata refresh"
+        );
     }
 }
 

@@ -32,26 +32,129 @@ pub fn glob(pattern: &str, name: &str) -> bool {
 /// Which commands each stratum provides: stratum -> command names.
 pub type Providers = BTreeMap<String, BTreeSet<String>>;
 
-/// The stratum that should run `cmd`:
-/// 1. the most specific matching pin whose stratum actually has the command
-///    (exact names beat globs, longer globs beat shorter ones),
-/// 2. otherwise the first stratum in `order` that has it.
-pub fn resolve(cfg: &Config, providers: &Providers, cmd: &str) -> Option<String> {
+/// Why a stratum runs a command (shown by `amctl which`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reason {
+    /// The user chose it: `amctl default <cmd> <stratum>`.
+    UserDefault,
+    /// A `[cross.pin]` entry in the shipped strata.toml (the pattern).
+    ShippedPin(String),
+    /// Nothing pinned: the first stratum in the lookup order that has it.
+    Order,
+    /// Nothing pinned and the host has it (the host comes first).
+    Host,
+}
+
+impl Reason {
+    /// Short machine-readable key for JSON: user, pin, order, host.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Reason::UserDefault => "user",
+            Reason::ShippedPin(_) => "pin",
+            Reason::Order => "order",
+            Reason::Host => "host",
+        }
+    }
+
+    /// One line for humans.
+    pub fn describe(&self, cmd: &str) -> String {
+        match self {
+            Reason::UserDefault => format!("your default (amctl default {cmd} ...)"),
+            Reason::ShippedPin(pattern) => format!("shipped pin `{pattern}` in strata.toml"),
+            Reason::Order => "first in the lookup order that has it".into(),
+            Reason::Host => "the host wins when nothing is pinned".into(),
+        }
+    }
+}
+
+/// The winning stratum and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub stratum: String,
+    pub reason: Reason,
+}
+
+/// A rule that matched `cmd` but was passed over: its stratum lacks it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Passed {
+    pub stratum: String,
+    pub reason: Reason,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Resolution {
+    pub choice: Option<Choice>,
+    pub passed_over: Vec<Passed>,
+}
+
+/// The stratum that should run `cmd`, and why. First match wins:
+/// 1. the user's default (`/etc/aftermath/strata.d/user.toml`),
+/// 2. the most specific shipped pin (exact names beat globs, longer globs
+///    beat shorter ones),
+/// 3. the first stratum in the lookup order.
+///
+/// A default or pin whose stratum doesn't have the command is passed over
+/// (and reported), so a stale choice never makes a command disappear.
+pub fn explain(cfg: &Config, providers: &Providers, cmd: &str) -> Resolution {
     let has = |s: &str| providers.get(s).is_some_and(|set| set.contains(cmd));
-    let mut pins: Vec<(&String, &String)> = cfg
+    let mut passed_over = Vec::new();
+
+    for (stratum, reason) in pinned(cfg, cmd) {
+        if has(&stratum) {
+            let choice = Some(Choice { stratum, reason });
+            return Resolution {
+                choice,
+                passed_over,
+            };
+        }
+        passed_over.push(Passed { stratum, reason });
+    }
+
+    let choice = cfg.order().into_iter().find(|s| has(s)).map(|stratum| {
+        let reason = if stratum == cfg.host_name() {
+            Reason::Host
+        } else {
+            Reason::Order
+        };
+        Choice { stratum, reason }
+    });
+
+    Resolution {
+        choice,
+        passed_over,
+    }
+}
+
+/// The pins that apply to `cmd`, strongest first: the user's, then the
+/// shipped ones by specificity.
+fn pinned(cfg: &Config, cmd: &str) -> Vec<(String, Reason)> {
+    let mut out = Vec::new();
+
+    if let Some(stratum) = cfg.user.pin.get(cmd) {
+        out.push((stratum.clone(), Reason::UserDefault));
+    }
+
+    let mut shipped: Vec<(&String, &String)> = cfg
         .cross
         .pin
         .iter()
-        .filter(|(pat, _)| glob(pat, cmd))
+        .filter(|(pattern, _)| glob(pattern, cmd))
         .collect();
-    pins.sort_by_key(|(pat, _)| {
-        let exact = !pat.contains(['*', '?']);
-        (std::cmp::Reverse(exact), std::cmp::Reverse(pat.len()))
+
+    shipped.sort_by_key(|(pattern, _)| {
+        let exact = !pattern.contains(['*', '?']);
+        (std::cmp::Reverse(exact), std::cmp::Reverse(pattern.len()))
     });
-    if let Some((_, s)) = pins.into_iter().find(|(_, s)| has(s)) {
-        return Some(s.clone());
+
+    for (pattern, stratum) in shipped {
+        out.push((stratum.clone(), Reason::ShippedPin(pattern.clone())));
     }
-    cfg.order().into_iter().find(|s| has(s))
+    out
+}
+
+/// The stratum that should run `cmd` (see [`explain`]).
+pub fn resolve(cfg: &Config, providers: &Providers, cmd: &str) -> Option<String> {
+    explain(cfg, providers, cmd).choice.map(|c| c.stratum)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +230,8 @@ pub enum Action {
     List,
     /// `strat --which <cmd>`
     Which(String),
+    /// `strat --which -a <cmd>`: every copy, and which one wins
+    WhichAll(String),
     /// `strat <stratum> <cmd> [args...]`
     Run {
         stratum: String,
@@ -151,7 +256,9 @@ pub fn decide(argv: &[String]) -> Action {
         [] => Action::Usage,
         [h, ..] if h == "-h" || h == "--help" => Action::Usage,
         [l] if l == "--list" || l == "-l" => Action::List,
-        [w, cmd] if w == "--which" || w == "-w" => Action::Which(cmd.clone()),
+        [w, cmd] if is_which(w) => Action::Which(cmd.clone()),
+        [w, a, cmd] if is_which(w) && is_all(a) => Action::WhichAll(cmd.clone()),
+        [a, w, cmd] if is_all(a) && is_which(w) => Action::WhichAll(cmd.clone()),
         [stratum, cmd, args @ ..] => Action::Run {
             stratum: stratum.clone(),
             cmd: cmd.clone(),
@@ -159,6 +266,14 @@ pub fn decide(argv: &[String]) -> Action {
         },
         [_] => Action::Usage,
     }
+}
+
+fn is_which(arg: &str) -> bool {
+    arg == "--which" || arg == "-w"
+}
+
+fn is_all(arg: &str) -> bool {
+    arg == "-a" || arg == "--all"
 }
 
 #[cfg(test)]
@@ -241,6 +356,70 @@ pacman = "ubuntu"
     }
 
     #[test]
+    fn reasons() {
+        let (c, p) = (cfg(), providers());
+        let why = |cmd: &str| {
+            explain(&c, &p, cmd)
+                .choice
+                .map(|ch| (ch.stratum, ch.reason))
+        };
+
+        assert_eq!(why("ls"), Some(("arch".into(), Reason::Host)));
+        assert_eq!(
+            why("dpkg"),
+            Some(("ubuntu".into(), Reason::ShippedPin("dpkg".into())))
+        );
+        assert_eq!(
+            why("add-apt-repository"),
+            Some(("ubuntu".into(), Reason::Order))
+        );
+
+        // The exact `apt-key = "arch"` pin is passed over (arch lacks it).
+        let r = explain(&c, &p, "apt-key");
+        assert_eq!(r.passed_over[0].stratum, "arch");
+        assert_eq!(r.choice.unwrap().reason, Reason::ShippedPin("apt*".into()));
+    }
+
+    #[test]
+    fn user_default_beats_shipped_pin_and_order() {
+        let (mut c, p) = (cfg(), providers());
+        c.user.pin.insert("ls".into(), "ubuntu".into());
+        c.user.pin.insert("dpkg".into(), "arch".into());
+
+        let ls = explain(&c, &p, "ls").choice.unwrap();
+        assert_eq!(
+            (ls.stratum.as_str(), ls.reason),
+            ("ubuntu", Reason::UserDefault)
+        );
+
+        // Back to the host, against the shipped `dpkg = "ubuntu"` pin.
+        let dpkg = explain(&c, &p, "dpkg").choice.unwrap();
+        assert_eq!(
+            (dpkg.stratum.as_str(), dpkg.reason),
+            ("arch", Reason::UserDefault)
+        );
+
+        let launchers = plan(&c, &p);
+        let ls_launcher = launchers.iter().find(|l| l.cmd == "ls").unwrap();
+        assert_eq!(ls_launcher.slot, Slot::Pin, "shadows the host's ls");
+        assert!(
+            launchers.iter().all(|l| l.cmd != "dpkg"),
+            "host runs dpkg itself"
+        );
+    }
+
+    #[test]
+    fn a_default_to_a_stratum_without_the_command_is_passed_over() {
+        let (mut c, p) = (cfg(), providers());
+        c.user.pin.insert("makepkg".into(), "ubuntu".into());
+
+        let r = explain(&c, &p, "makepkg");
+        assert_eq!(r.choice.unwrap().stratum, "arch");
+        assert_eq!(r.passed_over.len(), 1);
+        assert_eq!(r.passed_over[0].reason, Reason::UserDefault);
+    }
+
+    #[test]
     fn plan_slots() {
         let plan = plan(&cfg(), &providers());
         let find = |n: &str| plan.iter().find(|l| l.cmd == n).cloned();
@@ -280,6 +459,14 @@ pacman = "ubuntu"
                 cmd: "apt-get".into(),
                 args: v(&["update"])
             }
+        );
+        assert_eq!(
+            decide(&v(&["strat", "--which", "-a", "vi"])),
+            Action::WhichAll("vi".into())
+        );
+        assert_eq!(
+            decide(&v(&["strat", "-a", "--which", "vi"])),
+            Action::WhichAll("vi".into())
         );
         assert_eq!(decide(&v(&["strat", "ubuntu"])), Action::Usage);
     }

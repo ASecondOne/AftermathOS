@@ -114,10 +114,70 @@ strat --which apt               # -> ubuntu
   command names or globs to a stratum (`pacman`/`makepkg` → arch,
   `apt`, `apt-*`, `dpkg`, `dpkg-*`, `debconf*`, `add-apt-repository` → ubuntu;
   exact names beat globs), `[cross] order` decides the rest (host first).
+  Your own choices (`amctl default`, below) beat both.
 * **Man pages**: `man` is not in the Arch rootfs, so `man` resolves to
   Ubuntu's (`man-db` is in the stratum) and shows Ubuntu's pages; once the host
   has `man-db`, use `man -M /aftermath/cross/share/man <page>` for strata pages
   (Arch's `/etc/profile` unsets `MANPATH`).
+
+### Which stratum runs a command: `amctl which` and `amctl default`
+
+When a command exists in more than one stratum (`tac`, `ls`, `bash`, `vim`, ...),
+`amctl which` lists **every copy**, with its real path, and marks which one
+runs and why:
+
+```text
+$ amctl which tac
+AFTERMATH which tac
+  * arch      /usr/bin/tac
+    ubuntu    /usr/bin/tac  (/aftermath/strata/ubuntu/usr/bin/tac)
+
+  winner      arch  the host wins when nothing is pinned
+  runs via    the host's PATH (no launcher for `tac`)
+  unchecked   windows (disabled)
+```
+
+* `path` is where it sits in the stratum's PATH, `-> real` follows symlinks
+  *inside* the stratum (`/usr/bin/vi -> /usr/bin/vim.basic` through
+  `/etc/alternatives`), and the part in brackets is the same file as the host
+  sees it. A copy hidden by an earlier one in the same stratum's PATH is marked
+  "shadowed".
+* The reason is one of: **your default** (`amctl default`), a **shipped pin**
+  (`[cross.pin]` in strata.toml, with the pattern), the **lookup order**, or
+  **the host** (nothing pinned, the host comes first). A default or pin whose
+  stratum lacks the command is skipped (and shown as "skipped"), so the command
+  never disappears.
+* Works for every user and without the engine (it only reads files);
+  `amctl --json which tac` for scripts; exit status 1 if no stratum has it.
+* `strat --which -a tac` prints the same as plain text (`strat --which tac`
+  still prints just the stratum name).
+
+Choose the winner yourself (root; through the engine, or directly when it is
+down):
+
+```sh
+amctl default tac ubuntu        # Ubuntu's tac from now on (beats shipped pins)
+amctl default dpkg arch         # back to the host, against the shipped `dpkg = "ubuntu"` pin
+amctl default tac --reset       # forget it: the shipped rules apply again
+amctl default list              # your defaults, the lookup order, the shipped pins
+amctl default order ubuntu arch # order for commands nothing pins (--reset to undo)
+```
+
+* Your choices live in their own file, **`/etc/aftermath/strata.d/user.toml`**
+  (`[pin]` command = stratum, optional `order`); the shipped `strata.toml` is
+  never touched. Only exact command names, no globs. A broken user.toml is
+  ignored with a warning (plan B: the shipped rules).
+* **No reboot**: the launchers are regenerated right away
+  (`aftermath-strata refresh`). If strata are not up (Arch host mode), the
+  choice is saved and applies when they are.
+* **bash's command cache**: bash remembers where it found a command (`hash`),
+  so an open shell would keep running the old copy. Shells started by the
+  engine get `PROMPT_COMMAND="hash -r"`, so they pick up a change at the next
+  prompt. In other shells (a desktop terminal) run `hash -r` once.
+* It is in /etc, so it is kept across reboots with the host overlay disk and
+  lost on a RAM-only root (like `state.toml`).
+* A command literally called `list` or `order` can't be given a default this
+  way (those words are subcommands); edit user.toml for that.
 
 ### pacman inside the VM
 
@@ -404,6 +464,8 @@ amctl overlay status
 amctl overlay reset                # wipe the saved system changes at the next boot (--cancel to undo)
 amctl keymap                       # configured/loaded layout + a live check (key right of T -> `z`)
 amctl keymap set us                # load now and save in /etc/aftermath/aftermath.toml
+amctl which tac                    # every copy across strata, which one wins and why
+amctl default tac ubuntu           # choose the winner (--reset, list, order ...); see "Strata"
 amctl poweroff | amctl reboot
 amctl subsystems                   # what the engine offers
 amctl --json status                # every command: machine-readable JSON for scripts
@@ -421,7 +483,8 @@ stratum (it uses `strat` underneath).
 engine crashed), amctl says so in red and does what it can by itself:
 `status`, `strata list/status`, `services list` (files only) and `logs` are
 read straight from /proc, /sys, /run and the log files; as root,
-`boot next`, `overlay reset`, `keymap set` work offline too, and
+`boot next`, `overlay reset`, `keymap set`, `default` work offline too
+(and `which` never needs the engine), and
 `poweroff`/`reboot` signal PID 1 or, as a last resort, call the reboot
 syscall. amctl is a static binary, so it also runs in the BusyBox rescue
 layer.
@@ -429,7 +492,7 @@ layer.
 **Subsystems.** Inside the engine every area is a subsystem behind one
 small Rust trait (`crates/aftermath-engine/src/control.rs`: name, read-only
 verbs, `call`, an optional status summary, child-exit and timer hooks).
-Today: `system`, `strata`, `services`, `boot`, `overlay`, `locale`. Future
+Today: `system`, `strata`, `default`, `services`, `boot`, `overlay`, `locale`. Future
 pieces (a Windows stratum manager, a D-Bus/logind shim for Plasma) plug in
 as new subsystems plus an amctl subcommand; nothing else changes.
 

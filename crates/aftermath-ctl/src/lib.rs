@@ -5,12 +5,14 @@
 //!   network, uptime, boot id, strata) - the offline fallback of `amctl`
 //! * [`services`]: the service file format (/etc/aftermath/services/*.toml)
 //! * [`locale`]: keyboard layout (/etc/aftermath/aftermath.toml `[locale]`)
+//! * [`defaults`]: `amctl which` / `amctl default` (who runs a command)
 //! * [`grubenv`], [`overlay`], [`disks`]: boot-next, overlay reset and
 //!   disk discovery, used by the engine and by `amctl` as root when the
 //!   engine is down (plan B)
 //!
 //! Pure parts are unit-tested; nothing here starts processes on its own.
 
+pub mod defaults;
 pub mod disks;
 pub mod facts;
 pub mod grubenv;
