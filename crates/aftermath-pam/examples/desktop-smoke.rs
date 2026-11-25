@@ -160,6 +160,7 @@ fn probe() -> Result<()> {
     wait("SDDM did not open a graphical greeter", || {
         !processes("sddm-greeter").is_empty()
     })?;
+    verify_greeter()?;
     credentials("bob")?;
     credentials("root")?;
     let bob = aftermath_ctl::users::read(Path::new("/"))?
@@ -231,6 +232,9 @@ fn probe() -> Result<()> {
             .any(|s| s["user"] == "bob" && s["type"] == "wayland" && s["seat_control"] == true),
         "graphical PAM session was not registered with elogind",
     )?;
+    verify_keyboard(bob.uid, bob.gid, address)?;
+    verify_audio(bob.uid, bob.gid, address, &runtime)?;
+    verify_style()?;
     println!("AM_PLASMA_READY");
     std::io::stdout().flush()?;
     let mut command = String::new();
@@ -264,6 +268,137 @@ fn probe() -> Result<()> {
     println!("AM_GRAPHICAL_LOGOUT_OK");
     Ok(())
 }
+
+/// The greeter must use Wayland on tty1, with no unlocked shell on that VT.
+fn verify_greeter() -> Result<()> {
+    let greeter = processes("sddm-greeter")
+        .into_iter()
+        .next()
+        .ok_or("no greeter")?;
+    let environment = fs::read(greeter.join("environ"))?;
+    let environment = String::from_utf8_lossy(&environment);
+    require(
+        environment.contains("XDG_SESSION_TYPE=wayland"),
+        "SDDM greeter is not Wayland",
+    )?;
+    require(
+        environment.contains("XDG_VTNR=1"),
+        "SDDM greeter did not use tty1",
+    )?;
+    require(
+        fs::read_to_string("/sys/class/tty/tty0/active")?.trim() == "tty1",
+        "greeter is on the wrong active VT",
+    )?;
+    for process in processes("script").into_iter().chain(processes("bash")) {
+        let stat = fs::read_to_string(process.join("stat"))?;
+        let fields = stat.rsplit_once(") ").ok_or("invalid process stat")?.1;
+        require(
+            fields.split_whitespace().nth(4) != Some("1025"),
+            "root shell occupies tty1 during desktop boot",
+        )?;
+    }
+    require(
+        processes("Xorg").is_empty(),
+        "greeter started an Xorg server",
+    )?;
+    require(
+        Command::new("/usr/bin/amctl")
+            .args(["logs", "desktop"])
+            .output()?
+            .status
+            .success(),
+        "desktop logs are unavailable",
+    )?;
+    println!("AM_WAYLAND_GREETER_TTY1_OK");
+    Ok(())
+}
+
+/// Query KWin's actual keymap rather than just checking a generated file.
+fn verify_keyboard(uid: u32, gid: u32, address: &str) -> Result<()> {
+    let layouts = bus(
+        uid,
+        gid,
+        address,
+        "org.kde.keyboard",
+        "/Layouts",
+        "org.kde.KeyboardLayouts.getLayoutsList",
+        &[],
+    )?;
+    require(
+        layouts.contains("German") && layouts.contains("no dead keys"),
+        "KWin did not load German nodeadkeys",
+    )?;
+    println!("AM_WAYLAND_KEYBOARD_OK");
+    Ok(())
+}
+
+/// Real user-owned services must expose an ALSA-backed PipeWire output sink.
+fn verify_audio(uid: u32, gid: u32, address: &str, runtime: &Path) -> Result<()> {
+    require(
+        runtime.join("aftermath-desktop-session").exists(),
+        "SDDM bypassed the Rust session command",
+    )?;
+    for program in ["pipewire", "wireplumber", "pipewire-pulse"] {
+        wait(
+            &format!("session audio daemon {program} is missing"),
+            || {
+                let executable = if program == "pipewire-pulse" {
+                    "pipewire"
+                } else {
+                    program
+                };
+                processes(executable).iter().any(|path| {
+                    fs::metadata(path).is_ok_and(|meta| meta.uid() == uid)
+                        && fs::read(path.join("cmdline")).is_ok_and(|args| {
+                            args.split(|byte| *byte == 0)
+                                .next()
+                                .and_then(|arg| std::str::from_utf8(arg).ok())
+                                .and_then(|arg| Path::new(arg).file_name())
+                                .is_some_and(|name| name == program)
+                        })
+                })
+            },
+        )?;
+    }
+    wait("WirePlumber did not expose the virtual audio card", || {
+        Command::new("/usr/bin/pw-dump")
+            .uid(uid)
+            .gid(gid)
+            .env("XDG_RUNTIME_DIR", runtime)
+            .env("DBUS_SESSION_BUS_ADDRESS", address)
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("alsa_output")
+            })
+    })?;
+    require(
+        runtime.join("pulse/native").exists(),
+        "PulseAudio compatibility socket is missing",
+    )?;
+    println!("AM_PIPEWIRE_AUDIO_OK");
+    Ok(())
+}
+
+/// Fresh users receive the requested palette and wallpaper once.
+fn verify_style() -> Result<()> {
+    wait("Aftermath desktop defaults were not applied", || {
+        fs::read_to_string("/home/bob/.config/aftermath/style-choice")
+            .is_ok_and(|value| value == "done")
+    })?;
+    require(
+        fs::read_to_string("/home/bob/.config/kdeglobals")
+            .unwrap_or_default()
+            .contains("ColorScheme=Aftermath"),
+        "Aftermath color scheme missing",
+    )?;
+    wait("Aftermath wallpaper missing", || {
+        fs::read_to_string("/home/bob/.config/plasma-org.kde.plasma.desktop-appletsrc")
+            .is_ok_and(|text| text.contains("wallpapers/Aftermath"))
+    })?;
+    println!("AM_DESKTOP_STYLE_OK");
+    Ok(())
+}
 fn main() -> ExitCode {
     if unsafe { libc::geteuid() } != 0
         || !fs::read_to_string("/proc/cmdline").is_ok_and(|s| {
@@ -281,6 +416,12 @@ fn main() -> ExitCode {
             "/run/aftermath/elogind.log",
             "/run/aftermath/sddm.log",
             "/home/bob/.local/share/sddm/wayland-session.log",
+            "/home/bob/.local/state/aftermath/audio/pipewire.log",
+            "/home/bob/.local/state/aftermath/audio/wireplumber.log",
+            "/home/bob/.local/state/aftermath/audio/pipewire-pulse.log",
+            "/home/bob/.config/aftermath/style-choice",
+            "/run/user/1000/aftermath-desktop-session",
+            "/proc/asound/cards",
         ] {
             if let Ok(text) = fs::read_to_string(log) {
                 eprintln!(

@@ -4,6 +4,9 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+#[path = "live-smoke/disk.rs"]
+mod disk;
 
 use nix::mount::{mount, MsFlags};
 use nix::sys::signal::{kill, Signal};
@@ -28,15 +31,17 @@ fn run() -> Result<()> {
     let cmdline = fs::read_to_string("/proc/cmdline")?;
     require(
         cmdline.contains("aftermath.test=live-smoke")
-            || cmdline.contains("aftermath.test=no-success"),
+            || cmdline.contains("aftermath.test=no-success")
+            || cmdline.contains("aftermath.test=desktop-fail"),
         "private test boot required",
     )?;
     match phase.as_str() {
         "save" => save()?,
         "verify" => {
             verify_saved()?;
-            select("aftermath-clean", "live-smoke")?;
+            select("aftermath", "desktop-fail")?;
         }
+        "desktop-fallback" => desktop_fallback()?,
         "clean" => clean()?,
         "restore" => {
             verify_saved()?;
@@ -99,11 +104,22 @@ fn save() -> Result<()> {
     fs::write("/root/live-smoke-saved", SAVED)?;
     fs::write("/etc/live-smoke-saved", SAVED)?;
     fs::remove_file(WHITEOUT)?;
+    disk::create()?;
+    fs::write(
+        "/run/aftermath/desktop-events.log",
+        "persistent desktop log test\n",
+    )?;
+    wait_for(old_desktop_log_exists)?;
     select("aftermath-console", "live-smoke")
 }
 
 fn verify_saved() -> Result<()> {
     live_root()?;
+    disk::verify()?;
+    require(
+        old_desktop_log_exists(),
+        "desktop logs did not survive reboot",
+    )?;
     require(
         fs::read_to_string("/root/live-smoke-saved")? == SAVED,
         "/root change lost",
@@ -121,6 +137,7 @@ fn verify_saved() -> Result<()> {
 /// Ignoring saved changes must expose the original image without erasing them.
 fn clean() -> Result<()> {
     live_root()?;
+    disk::verify()?;
     require(
         !Path::new("/root/live-smoke-saved").exists(),
         "clean boot applied saved changes",
@@ -140,6 +157,56 @@ fn clean() -> Result<()> {
         "clean boot mounted saved upper",
     )?;
     select("aftermath-console", "live-smoke")
+}
+
+/// A graphical failure must visibly release tty1 and expose usable diagnostics.
+fn desktop_fallback() -> Result<()> {
+    wait_for(|| {
+        Command::new("/usr/bin/amctl")
+            .args(["logs", "desktop"])
+            .output()
+            .is_ok_and(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("visible console fallback opened on tty1")
+            })
+    })?;
+    require(
+        fs::read_to_string("/sys/class/tty/tty0/active")?.trim() == "tty1",
+        "desktop failure did not activate tty1",
+    )?;
+    let output = Command::new("/usr/bin/amctl")
+        .args(["logs", "desktop"])
+        .output()?;
+    require(
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .contains("requested private desktop failure test"),
+        "desktop failure log is unavailable",
+    )?;
+    select("aftermath-clean", "live-smoke")
+}
+
+fn old_desktop_log_exists() -> bool {
+    fs::read_dir("/var/log/aftermath")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            fs::read_to_string(entry.path().join("desktop.log"))
+                .is_ok_and(|text| text.contains("persistent desktop log test"))
+        })
+}
+
+/// Give the log mirror and graphical fallback time to run without hiding failures.
+fn wait_for(check: impl Fn() -> bool) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !check() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    require(
+        check(),
+        "background service did not reach the expected state",
+    )
 }
 
 /// One deliberately unacknowledged launch arms the existing GRUB counter.
@@ -193,7 +260,10 @@ fn rescue(cmdline: &str) -> Result<()> {
         "rescue depends on the desktop root",
     )?;
     require(
-        fs::read_to_string("/mnt/vdb/upper/root/live-smoke-saved")? == SAVED,
+        fs::read_dir("/mnt")?.flatten().any(|entry| {
+            fs::read_to_string(entry.path().join("upper/root/live-smoke-saved"))
+                .is_ok_and(|text| text == SAVED)
+        }),
         "rescue cannot read saved data",
     )?;
     update_env(

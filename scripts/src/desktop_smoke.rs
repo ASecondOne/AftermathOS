@@ -124,6 +124,14 @@ pub fn run(ctx: &Ctx, use_grub: bool, bios: bool) -> Result<()> {
             init.with_file_name("aftermath-desktop-session"),
             "usr/lib/aftermath/aftermath-desktop-session",
         ),
+        (
+            init.with_file_name("aftermath-desktop-defaults"),
+            "usr/lib/aftermath/aftermath-desktop-defaults",
+        ),
+        (
+            init.with_file_name("aftermath-greeter"),
+            "usr/lib/aftermath/aftermath-greeter",
+        ),
         (init.with_file_name("amctl"), "usr/bin/amctl"),
         (
             init.with_file_name("libpam_aftermath.so"),
@@ -189,6 +197,7 @@ pub fn run(ctx: &Ctx, use_grub: bool, bios: bool) -> Result<()> {
     let socket = work.join("qmp.sock");
     let _ = fs::remove_file(&socket);
     let mut command = Command::new("qemu-system-x86_64");
+    crate::vm_disk::audio(&mut command, "none");
     command
         .args([
             "-machine",

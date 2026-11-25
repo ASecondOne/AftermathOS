@@ -25,6 +25,7 @@ pub fn run(ctx: &Ctx, bios: bool) -> Result<()> {
     for phase in [
         "save",
         "verify",
+        "desktop-fallback",
         "clean",
         "restore",
         "unconfirmed",
@@ -115,6 +116,7 @@ fn prepare(ctx: &Ctx, bios: bool) -> Result<Ctx> {
             .arg("::/boot/live-smoke"),
     )?;
     crate::persist::ensure_host_overlay(&private, "512M")?;
+    crate::vm_disk::ensure(&private, crate::vm_disk::DEFAULT_SIZE)?;
     Ok(private)
 }
 
@@ -169,6 +171,11 @@ fn launch(ctx: &Ctx, bios: bool) -> Result<Guest> {
             "-nic",
             "user,model=virtio-net-pci",
         ]);
+    crate::vm_disk::attach_named(
+        &mut command,
+        &ctx.vm_dir().join("disk.qcow2"),
+        "AFTERMATH_TEST_DISK",
+    );
     if OpenOptions::new()
         .read(true)
         .write(true)
@@ -256,7 +263,11 @@ impl Serial {
     fn wait_for(&mut self, marker: &str) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(90);
         loop {
-            if self.pending.contains("AM_LIVE_FAILED") {
+            if self
+                .pending
+                .find("AM_LIVE_FAILED")
+                .is_some_and(|start| self.pending[start..].contains('\n'))
+            {
                 bail!("guest assertion failed; see {}", self.log.display());
             }
             if let Some(index) = self.pending.find(marker) {
