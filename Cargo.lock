@@ -42,6 +42,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aftermath-pam"
+version = "0.1.0"
+dependencies = [
+ "aftermath-ctl",
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "aftermath-strata"
 version = "0.1.0"
 dependencies = [
@@ -768,6 +777,7 @@ dependencies = [
  "chrono",
  "clap",
  "png",
+ "serde_json",
 ]
 
 [[package]]

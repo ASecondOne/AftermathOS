@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
     name = "amctl",
     bin_name = "amctl",
     version,
-    about = "Aftermath control: status, strata, services, logs, boot and power",
+    about = "Aftermath control: status, strata, services, desktop checks, logs, boot and power",
     after_help = "Examples:\n  amctl status\n  amctl list\n  amctl enable fedora\n  amctl strata enter ubuntu\n  \
                   amctl which vim\n  amctl default vim ubuntu\n  \
                   amctl services restart heartbeat\n  amctl logs -f --service heartbeat\n  \
@@ -41,6 +41,15 @@ pub enum Cmd {
     /// Services from /etc/aftermath/services/*.toml
     #[command(subcommand, visible_alias = "svc")]
     Services(SvcCmd),
+    /// Desktop prerequisites (read-only; does not start a desktop)
+    #[command(subcommand)]
+    Desktop(DesktopCmd),
+    /// Authenticated PAM sessions and per-user runtime directories
+    #[command(subcommand)]
+    Sessions(SessionCmd),
+    /// Local accounts, private homes and interactive password setup
+    #[command(subcommand)]
+    Users(UserCmd),
     /// Every copy of a command across the strata, and which one wins (and why)
     Which {
         /// Command name, e.g. vim
@@ -133,6 +142,56 @@ pub enum SvcCmd {
 }
 
 #[derive(Subcommand)]
+pub enum DesktopCmd {
+    /// Graphical login, seat provider and desktop supervision
+    Status,
+    /// Live system D-Bus readiness, machine identity and supervision status
+    Bus,
+    /// Live udev supervision, readiness and device discovery status
+    Devices,
+    /// Check host Plasma Wayland prerequisites and engine implementation gaps
+    Check {
+        /// Inspect an unpacked rootfs locally instead of asking the engine
+        #[arg(long)]
+        root: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SessionCmd {
+    List,
+}
+
+#[derive(Subcommand)]
+pub enum UserCmd {
+    List,
+    Show {
+        name: String,
+    },
+    /// Create a regular user and prompt for a password (root)
+    Add {
+        name: String,
+        /// Leave password login locked; do not prompt
+        #[arg(long)]
+        locked: bool,
+    },
+    /// Change your own password, or reset another user's password as root
+    Passwd {
+        name: Option<String>,
+    },
+    /// Lock password login; existing sessions continue (root)
+    Lock {
+        name: String,
+    },
+    /// Restore a previously locked password (root)
+    Unlock {
+        name: String,
+    },
+    /// Retry sharing host account changes with running strata (root)
+    Sync,
+}
+
+#[derive(Subcommand)]
 pub enum BootCmd {
     /// normal | host | busybox | clean | serial | debug | none (cancel)
     Next { target: String },
@@ -210,6 +269,67 @@ pub enum DefaultSub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_commands_accept_locked_setup_but_no_password_arguments() {
+        assert!(
+            matches!(Cli::try_parse_from(["amctl", "users", "add", "alice", "--locked", "--json"]).unwrap().cmd,
+            Cmd::Users(UserCmd::Add { name, locked: true }) if name == "alice")
+        );
+        assert!(matches!(
+            Cli::try_parse_from(["amctl", "users", "passwd"])
+                .unwrap()
+                .cmd,
+            Cmd::Users(UserCmd::Passwd { name: None })
+        ));
+        assert!(Cli::try_parse_from(["amctl", "users", "passwd", "alice", "secret"]).is_err());
+        assert!(
+            Cli::try_parse_from(["amctl", "users", "add", "alice", "--password", "secret"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn desktop_check_accepts_local_root_and_json() {
+        assert!(matches!(
+            Cli::try_parse_from(["amctl", "sessions", "list"])
+                .unwrap()
+                .cmd,
+            Cmd::Sessions(SessionCmd::List)
+        ));
+        assert!(Cli::try_parse_from(["amctl", "sessions", "open"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["amctl", "desktop", "bus"])
+                .unwrap()
+                .cmd,
+            Cmd::Desktop(DesktopCmd::Bus)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["amctl", "desktop", "devices"])
+                .unwrap()
+                .cmd,
+            Cmd::Desktop(DesktopCmd::Devices)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["amctl", "desktop", "check"])
+                .unwrap()
+                .cmd,
+            Cmd::Desktop(DesktopCmd::Check { root: None })
+        ));
+        let cli = Cli::try_parse_from([
+            "amctl",
+            "--json",
+            "desktop",
+            "check",
+            "--root",
+            "out/rootfs",
+        ])
+        .unwrap();
+        assert!(cli.json);
+        assert!(matches!(cli.cmd,
+            Cmd::Desktop(DesktopCmd::Check { root: Some(root) }) if root == std::path::Path::new("out/rootfs")));
+        assert!(Cli::try_parse_from(["amctl", "desktop", "start"]).is_err());
+    }
 
     #[test]
     fn strata_shortcuts_and_existing_commands_parse() {

@@ -31,6 +31,24 @@ fn print(st: &Style, v: &Value) {
     st.row("network", &network_line(st, &v["network"]));
     st.row("strata", &strata_line(st, v));
     st.row("services", &services_line(st, &v["services"]));
+    if let Some(state) = v["desktop"]["devices"]["state"].as_str() {
+        st.row(
+            "devices",
+            &format!(
+                "{state}; coldplug {}",
+                text(&v["desktop"]["devices"], "coldplug")
+            ),
+        );
+    }
+    if let Some(state) = v["desktop"]["bus"]["state"].as_str() {
+        st.row("system bus", state);
+    }
+    if let Some(active) = v["sessions"]["active"].as_u64() {
+        st.row(
+            "sessions",
+            &format!("{active} authenticated; {} users", v["sessions"]["users"]),
+        );
+    }
 
     let keymap = v["keymap"].as_str().unwrap_or("kernel default (US)");
     st.row("keymap", keymap);

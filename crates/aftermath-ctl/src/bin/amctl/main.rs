@@ -12,12 +12,15 @@
 //! then one module per area.
 
 mod cli;
+mod desktop;
 mod logs;
 mod output;
 mod services;
+mod sessions;
 mod status;
 mod strata;
 mod system;
+mod users;
 mod which;
 
 use std::process::ExitCode;
@@ -33,7 +36,7 @@ fn main() -> ExitCode {
     let cx = Ctx::new(cli.json, cli.no_color);
 
     match run(&cx, cli.cmd) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(e) => {
             report_error(&cx, &e);
             ExitCode::FAILURE
@@ -49,7 +52,7 @@ fn report_error(cx: &Ctx, err: &str) {
     }
 }
 
-fn run(cx: &Ctx, cmd: Cmd) -> Result<(), String> {
+fn run(cx: &Ctx, cmd: Cmd) -> Result<ExitCode, String> {
     match cmd {
         Cmd::List => strata::run(cx, cli::StrataCmd::List),
         Cmd::Enable { name } => strata::run(cx, cli::StrataCmd::Enable { name }),
@@ -57,6 +60,9 @@ fn run(cx: &Ctx, cmd: Cmd) -> Result<(), String> {
         Cmd::Status => status::run(cx),
         Cmd::Strata(c) => strata::run(cx, c),
         Cmd::Services(c) => services::run(cx, c),
+        Cmd::Desktop(c) => return desktop::run(cx, c),
+        Cmd::Sessions(c) => sessions::run(cx, c),
+        Cmd::Users(c) => users::run(cx, c),
         Cmd::Logs(args) => logs::run(cx, args),
         Cmd::Which { cmd } => which::which(cx, &cmd),
         Cmd::Default(args) => which::default(cx, args),
@@ -82,4 +88,5 @@ fn run(cx: &Ctx, cmd: Cmd) -> Result<(), String> {
             Ok(())
         }
     }
+    .map(|()| ExitCode::SUCCESS)
 }

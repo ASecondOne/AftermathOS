@@ -13,13 +13,17 @@
 //! Pure parts are unit-tested; nothing here starts processes on its own.
 
 pub mod defaults;
+pub mod desktop;
 pub mod disks;
 pub mod facts;
+pub mod graphical;
 pub mod grubenv;
 pub mod locale;
 pub mod overlay;
 pub mod proto;
 pub mod services;
+pub mod sessions;
+pub mod users;
 
 pub const RUN_DIR: &str = "/run/aftermath";
 /// Unix socket of the engine (mode 0666: everyone may query, only root may

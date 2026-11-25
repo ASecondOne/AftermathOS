@@ -4,7 +4,7 @@
 //! (adduser, systemd-sysusers, ...) replace those files with rename(), which
 //! fails on a bind-mounted file. Instead each stratum keeps its own system
 //! users (e.g. Ubuntu's `_apt`) and gets the host's *human* accounts (root
-//! and uid/gid 1000-59999) copied in at boot.
+//! and uid/gid 1000-59999) copied in at boot and when the host accounts change.
 
 use std::collections::BTreeSet;
 

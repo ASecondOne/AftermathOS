@@ -27,10 +27,11 @@ use std::path::{Path, PathBuf};
 
 use nix::mount::{mount, MsFlags};
 
+use aftermath_strata::account_sync::{self, replace};
 use aftermath_strata::config::{Config, Stratum};
 use aftermath_strata::cross::{self, Providers, Slot};
 use aftermath_strata::status::STATUS;
-use aftermath_strata::{at, users, BIN_DIRS, CONFIG, CROSS_DIR, STRAT_BIN};
+use aftermath_strata::{at, BIN_DIRS, CONFIG, CROSS_DIR, STRAT_BIN};
 
 #[path = "aftermath-strata/install.rs"]
 mod install;
@@ -90,6 +91,21 @@ fn main() {
             Ok(n) => println!("aftermath-strata: {n} cross-stratum launcher(s)"),
             Err(e) => fail(&e),
         },
+        "sync-users" => {
+            let result = load_config().and_then(|cfg| {
+                for name in up_list() {
+                    if let Some(s) = cfg.get(&name) {
+                        if !matches!(s.kind.as_str(), "host" | "windows") {
+                            account_sync::share(&at("/etc"), &at(&s.path).join("etc"))?;
+                        }
+                    }
+                }
+                Ok(())
+            });
+            if let Err(e) = result {
+                fail(&e);
+            }
+        }
         // Runtime control, used by aftermath-engine for `amctl strata ...`.
         "start" => match start_one(&opts, &target) {
             Ok(()) => println!("stratum `{target}` is up"),
@@ -105,7 +121,7 @@ fn main() {
         },
         _ => {
             eprintln!(
-                "usage: aftermath-strata setup|refresh|install <name>|start <name>|stop <name> [--disabled] \
+                "usage: aftermath-strata setup|refresh|sync-users|install <name>|start <name>|stop <name> [--disabled] \
                  [--no-disk] [--strat-bin PATH]"
             );
             std::process::exit(2);
@@ -450,43 +466,7 @@ fn share_etc(root: &Path) -> Result<(), String> {
         let _ = fs::write(etc.join("hostname"), h);
     }
 
-    let read = |base: &Path, f: &str| fs::read_to_string(base.join(f)).unwrap_or_default();
-    let host = at("/etc");
-    let user_names = users::shared_names(&read(&host, "passwd"));
-    let group_names = users::shared_names(&read(&host, "group"));
-    for (f, names) in [
-        ("passwd", &user_names),
-        ("shadow", &user_names),
-        ("group", &group_names),
-        ("gshadow", &group_names),
-    ] {
-        if !host.join(f).exists() {
-            continue;
-        }
-        let merged = users::merge(&read(&host, f), &read(&etc, f), names);
-        replace(
-            &etc.join(f),
-            &merged,
-            if f.ends_with("shadow") { 0o640 } else { 0o644 },
-        )?;
-    }
-    Ok(())
-}
-
-/// Atomic replace keeping the old mode/owner (shadow is root:shadow 0640 on Ubuntu).
-fn replace(path: &Path, text: &str, default_mode: u32) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
-    let tmp = path.with_extension("aftermath-new");
-    fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    let (mode, owner) = match fs::metadata(path) {
-        Ok(m) => (m.mode() & 0o7777, Some((m.uid(), m.gid()))),
-        Err(_) => (default_mode, None),
-    };
-    let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(mode));
-    if let Some((u, g)) = owner {
-        let _ = std::os::unix::fs::chown(&tmp, Some(u), Some(g));
-    }
-    fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+    account_sync::share(&at("/etc"), &etc)
 }
 
 fn commands(root: &Path) -> BTreeSet<String> {

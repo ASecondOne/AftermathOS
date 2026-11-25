@@ -60,8 +60,14 @@ pub const MAX_LINE: usize = 64 * 1024;
 /// Send one request to the engine. `Err` = the engine is not reachable
 /// (amctl then falls back to what it can do offline).
 pub fn call(socket: &str, req: &Request) -> std::io::Result<Response> {
+    call_timeout(socket, req, TIMEOUT)
+}
+
+/// A bounded call for PAM/session setup; authentication must fail closed
+/// promptly if the engine cannot answer.
+pub fn call_timeout(socket: &str, req: &Request, timeout: Duration) -> std::io::Result<Response> {
     let mut s = UnixStream::connect(socket)?;
-    s.set_read_timeout(Some(TIMEOUT))?;
+    s.set_read_timeout(Some(timeout))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut line = serde_json::to_string(req)?;
     line.push('\n');

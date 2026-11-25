@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["scripts", "crates/aftermath-init", "crates/aftermath-engine", "crates/aftermath-strata", "crates/aftermath-ctl"]
+members = ["scripts", "crates/aftermath-init", "crates/aftermath-engine", "crates/aftermath-strata", "crates/aftermath-ctl", "crates/aftermath-pam"]
 # The kernel tree has its own build system (Kbuild) and must never be
 # picked up by Cargo.
 exclude = ["linux"]

@@ -18,10 +18,15 @@ const SCRIPT: &str = "/usr/bin/script";
 
 #[derive(Default)]
 pub struct Shells {
-    by_pid: HashMap<i32, String>,
+    by_pid: HashMap<i32, Console>,
     mode: String,
     log_dir: Option<PathBuf>,
     quick_deaths: u32,
+}
+
+struct Console {
+    tty: String,
+    login: bool,
 }
 
 impl Shells {
@@ -29,9 +34,21 @@ impl Shells {
     pub fn start_all(&mut self, mode: &str, log_dir: Option<PathBuf>) -> bool {
         self.mode = mode.to_owned();
         self.log_dir = log_dir;
+        let login_ttys = aftermath_ctl::sessions::login_ttys(Path::new("/")).unwrap_or_else(|e| {
+            crate::warn(&format!("login terminal configuration: {e}"));
+            Vec::new()
+        });
         for tty in active_consoles() {
+            if login_ttys.contains(&tty) {
+                continue;
+            }
             if let Some(pid) = spawn(&tty, mode, self.log_dir.as_deref()) {
-                self.by_pid.insert(pid, tty);
+                self.by_pid.insert(pid, Console { tty, login: false });
+            }
+        }
+        for tty in login_ttys {
+            if let Some(pid) = spawn_login(&tty) {
+                self.by_pid.insert(pid, Console { tty, login: true });
             }
         }
         !self.by_pid.is_empty()
@@ -39,14 +56,19 @@ impl Shells {
 
     /// A child exited: respawn it if it was a console shell (true).
     pub fn child_exited(&mut self, pid: i32) -> bool {
-        let Some(tty) = self.by_pid.remove(&pid) else {
+        let Some(console) = self.by_pid.remove(&pid) else {
             return false;
         };
-        log(&format!("shell on {tty} exited, respawning"));
+        log(&format!("console on {} exited, respawning", console.tty));
         sleep(Duration::from_millis(300));
-        match spawn(&tty, &self.mode, self.log_dir.as_deref()) {
+        let spawned = if console.login {
+            spawn_login(&console.tty)
+        } else {
+            spawn(&console.tty, &self.mode, self.log_dir.as_deref())
+        };
+        match spawned {
             Some(p) => {
-                self.by_pid.insert(p, tty);
+                self.by_pid.insert(p, console);
             }
             None => self.quick_deaths += 1,
         }
@@ -55,6 +77,51 @@ impl Shells {
             std::process::exit(4);
         }
         true
+    }
+}
+
+/// Never wrap login in the console recorder: authentication input must not
+/// become part of the development root-shell transcript.
+fn spawn_login(tty: &str) -> Option<i32> {
+    let path = format!("/dev/{tty}");
+    let result = (|| -> std::io::Result<_> {
+        let input = File::options().read(true).write(true).open(&path)?;
+        let output = input.try_clone()?;
+        let error = input.try_clone()?;
+        let mut cmd = Command::new("/usr/bin/agetty");
+        cmd.args([
+            "--noclear",
+            "--login-program",
+            "/usr/bin/login",
+            "-",
+            "linux",
+        ])
+        .env_clear()
+        .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/bin")
+        .env("TERM", "linux")
+        .stdin(Stdio::from(input))
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::from(error));
+        // SAFETY: only async-signal-safe terminal/session syscalls after fork.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        cmd.spawn()
+    })();
+    match result {
+        Ok(child) => {
+            log(&format!("authenticated login available on {path}"));
+            Some(child.id() as i32)
+        }
+        Err(e) => {
+            crate::warn(&format!("cannot start login on {path}: {e}"));
+            None
+        }
     }
 }
 
@@ -96,7 +163,7 @@ fn spawn(tty: &str, mode: &str, log_dir: Option<&Path>) -> Option<i32> {
     };
     let banner = format!(
         "\n{RED}AFTERMATH{RESET} {PURPLE}(experimental){RESET}{note}\n\
-         Root shell, no login yet. `amctl status` for an overview, `poweroff` / `reboot` to leave.\n{root_note}{log_note}\n"
+         Development root shell. `amctl status` for an overview, `poweroff` / `reboot` to leave.\n{root_note}{log_note}\n"
     );
     if let Ok(mut f) = OpenOptions::new().write(true).open(&dev) {
         let _ = f.write_all(banner.as_bytes());

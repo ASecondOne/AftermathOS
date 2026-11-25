@@ -2,6 +2,7 @@
 //! `strat` multicall launcher. Everything here is pure (no mounts, no exec),
 //! so it is unit-tested.
 
+pub mod account_sync;
 pub mod catalog;
 pub mod config;
 pub mod cross;

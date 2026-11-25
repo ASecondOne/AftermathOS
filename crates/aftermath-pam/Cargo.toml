@@ -1,0 +1,16 @@
+[package]
+name = "aftermath-pam"
+description = "Rust PAM session module for Aftermath's engine-managed runtime directories"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "pam_aftermath"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libc = "0.2"
+serde_json = "1"
+aftermath-ctl = { path = "../aftermath-ctl" }

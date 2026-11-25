@@ -6,6 +6,8 @@
 //! * starts the strata (full mode). If that fails it logs it and keeps going
 //!   in plain Arch host mode: plan B is always a working Arch system.
 //! * loads the console keymap (/etc/aftermath/aftermath.toml [locale])
+//! * supervises foreground udev with bounded readiness and device discovery
+//! * prepares machine identity and supervises the system D-Bus with real probes
 //! * keeps a root shell on every console
 //! * runs the control socket for `amctl` (control.rs) and supervises the
 //!   services from /etc/aftermath/services (services.rs)
@@ -14,16 +16,24 @@
 //!
 //! Test hooks on the kernel command line (`aftermath.test=<name>`):
 //! `engine-crash` (crash in full mode), `engine-crash-always` (crash in every
-//! mode), `strata-fail`, `no-success` (never mark the boot good), `panic`
+//! mode), `strata-fail`, `udev-fail`, `dbus-fail`, `no-success` (never mark the boot good), `panic`
 //! (trigger a kernel panic, to test `panic=` reboots + GRUB boot counting).
 
+mod bus;
 mod control;
+mod desktop;
+mod graphical;
 mod logs;
+mod machine_id;
 mod network;
 mod services;
+mod sessions;
 mod shells;
 mod strata;
 mod subsystems;
+#[cfg(test)]
+mod test_support;
+mod users;
 
 use aftermath_ctl::grubenv;
 
@@ -101,6 +111,11 @@ fn main() {
     // ---- keyboard (first, so every console starts with the right layout)
     let _ = fs::create_dir_all("/run/aftermath");
     let keymap = subsystems::keyboard_boot();
+    graphical::system_accounts();
+
+    // ---- desktop foundations (machine identity, system bus, then devices)
+    // Before DHCP: udev rules may rename network interfaces.
+    let desktop = desktop::Desktop::boot(&cmdline);
 
     // ---- network (before strata: apt/pacman want it) ------------------
     network::start();
@@ -167,6 +182,9 @@ fn main() {
             Box::new(subsystems::System),
             Box::new(subsystems::Strata),
             Box::new(subsystems::Defaults),
+            Box::new(desktop),
+            Box::new(sessions::Sessions::new()),
+            Box::new(users::Users::default()),
             Box::new(svc),
             Box::new(subsystems::Boot),
             Box::new(subsystems::Overlay),

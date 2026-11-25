@@ -27,8 +27,9 @@ pub fn start() {
         return;
     }
     // -b: fork to background right away; -q: quiet on the console;
-    // --nodev: don't wait for udev to "initialise" interfaces. There is no
-    // udevd here, so without it dhcpcd waits forever and eth0 stays DOWN.
+    // --nodev: don't wait for udev to "initialise" interfaces. Keep this
+    // fallback even with udev supervision: device discovery is allowed to
+    // fail or be disabled without losing DHCP and the console.
     match quiet(Command::new("/usr/bin/dhcpcd").args(["-b", "-q", "--nodev"])) {
         Ok(s) if s.success() => crate::log("dhcpcd started"),
         other => crate::warn(&format!("dhcpcd: {other:?}")),
