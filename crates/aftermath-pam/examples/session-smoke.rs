@@ -139,7 +139,12 @@ impl Login {
                         &format!("terminal command exited before {pattern}"),
                     )?;
                 }
-                Err(e) => return Err(format!("login terminal before {pattern}: {e}").into()),
+                Err(e) => {
+                    let output = String::from_utf8_lossy(&self.received)
+                        .replace(PASSWORD, "[redacted]")
+                        .replace(OWN_PASSWORD, "[redacted]");
+                    return Err(format!("login terminal before {pattern}: {e}; {output}").into());
+                }
             }
             require(
                 Instant::now() < deadline,
@@ -352,7 +357,20 @@ fn shared_password_matches() -> Result<bool> {
         == guest.lines().find(|l| l.starts_with(&prefix)))
 }
 
+/// Restore signed package modes stripped by unprivileged fixture extraction.
+/// Files are root-owned here; production pacstrap already preserves these bits.
+fn restore_package_helpers() -> Result<()> {
+    for (path, mode) in [
+        ("/usr/bin/passwd", 0o4755),
+        ("/usr/bin/unix_chkpwd", 0o6755),
+    ] {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
+}
+
 fn root_probe() -> Result<()> {
+    restore_package_helpers()?;
     require(
         !fs::read_to_string("/etc/passwd")?
             .lines()

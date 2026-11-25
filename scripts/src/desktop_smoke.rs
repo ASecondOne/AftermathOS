@@ -158,7 +158,6 @@ pub fn run(ctx: &Ctx, use_grub: bool, bios: bool) -> Result<()> {
         patch.join("etc/aftermath/build-id"),
         "private-desktop-smoke\n",
     )?;
-    let archive = work.join("patch.cpio.zst");
     let merged = work.join("rootfs");
     if merged.is_dir() {
         crate::plasma::readable_tree(&merged)?;
@@ -176,35 +175,8 @@ pub fn run(ctx: &Ctx, use_grub: bool, bios: bool) -> Result<()> {
     ] {
         crate::image::copy_tree(&source, &merged)?;
     }
-    ctx.run(
-        Command::new("bsdtar")
-            .args([
-                "--format", "newc", "--uid", "0", "--gid", "0", "--zstd", "-cf",
-            ])
-            .arg(&archive)
-            .arg("-C")
-            .arg(&merged)
-            .arg("."),
-    )?;
-    let image = work.join("initramfs.img");
-    let mut output = File::create(&image)?;
-    std::io::copy(&mut File::open(archive)?, &mut output)?;
-    drop(output);
+    let private = assemble_live_boot(ctx, &work, &merged, &init)?;
     let boot = if use_grub {
-        let private = Ctx {
-            root: ctx.root.clone(),
-            out: work.join("boot"),
-            dry_run: false,
-        };
-        ctx.remove(&private.out)?;
-        fs::create_dir_all(
-            private
-                .kernel_image()
-                .parent()
-                .context("no kernel directory")?,
-        )?;
-        fs::hard_link(ctx.kernel_image(), private.kernel_image())?;
-        fs::hard_link(&image, private.initramfs())?;
         crate::grub::build_tree(&private)?;
         crate::grub::build_disk(
             &private,
@@ -222,7 +194,7 @@ pub fn run(ctx: &Ctx, use_grub: bool, bios: bool) -> Result<()> {
             "-machine",
             "q35",
             "-m",
-            "8G",
+            "4G",
             "-smp",
             "4",
             "-display",
@@ -278,8 +250,12 @@ pub fn run(ctx: &Ctx, use_grub: bool, bios: bool) -> Result<()> {
             ))
             .args(["-device", "virtio-blk-pci,drive=bootdisk,bootindex=0"]);
     } else {
-        command.arg("-kernel").arg(ctx.kernel_image()).arg("-initrd").arg(image)
+        command.arg("-kernel").arg(ctx.kernel_image()).arg("-initrd").arg(private.initramfs())
             .args(["-append", "rdinit=/usr/bin/init panic=5 console=tty0 console=ttyS0,115200 loglevel=4 aftermath.netwait=2 aftermath.test=desktop-smoke"]);
+        command.arg("-drive").arg(format!(
+            "file={},format=raw,if=virtio,readonly=on",
+            private.root_image().display()
+        ));
     }
     if OpenOptions::new()
         .read(true)
@@ -422,4 +398,28 @@ pub fn run(ctx: &Ctx, use_grub: bool, bios: bool) -> Result<()> {
     println!("Graphical smoke passed: temporary Bob/root credentials, SDDM, real Plasma Wayland login, unprivileged desktop, seat/session registration, user D-Bus and logout cleanup.");
     println!("Serial log: {}", log_path.display());
     Ok(())
+}
+
+/// Exercise the production bootstrap/SquashFS builder without host root access.
+fn assemble_live_boot(
+    ctx: &Ctx,
+    work: &std::path::Path,
+    root: &std::path::Path,
+    init: &std::path::Path,
+) -> Result<Ctx> {
+    let private = Ctx {
+        root: ctx.root.clone(),
+        out: work.join("boot"),
+        dry_run: false,
+    };
+    ctx.remove(&private.out)?;
+    fs::create_dir_all(
+        private
+            .kernel_image()
+            .parent()
+            .context("no kernel directory")?,
+    )?;
+    fs::hard_link(ctx.kernel_image(), private.kernel_image())?;
+    crate::live_image::build(&private, root, init, false)?;
+    Ok(private)
 }

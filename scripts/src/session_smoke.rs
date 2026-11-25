@@ -1,4 +1,4 @@
-//! Reproducible Rust-only host/guest integration test. Private RAM guest,
+//! Reproducible Rust-only host/guest integration test. Private live-image guest,
 //! no saved VM disks; the test account only exists inside that guest.
 
 use std::fs::{self, File, OpenOptions};
@@ -40,12 +40,17 @@ fn entry(out: &mut Vec<u8>, name: &str, data: &[u8], mode: u32) -> Result<()> {
 
 pub fn run(ctx: &Ctx) -> Result<()> {
     if ctx.dry_run {
-        println!("Build Rust engine/PAM module and guest test; append a temporary initramfs overlay; boot QEMU without persistent disks and verify authenticated sessions.");
+        println!("Build Rust engine/PAM module and guest test into a private SquashFS root; boot QEMU without saved disks and verify authenticated sessions.");
         return Ok(());
     }
     let init = crate::image::build_init(ctx)?;
-    if !ctx.initramfs().exists() || !ctx.kernel_image().exists() {
-        bail!("build the initial kernel/initramfs with `cargo am run` first");
+    if !ctx
+        .out
+        .join("vm/desktop-smoke/rootfs/usr/bin/bash")
+        .exists()
+        || !ctx.kernel_image().exists()
+    {
+        bail!("build the private root fixture with `cargo am smoke-desktop --grub` first");
     }
     let mut build = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     build
@@ -116,14 +121,11 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     if !zstd.wait()?.success() {
         bail!("could not compress test initramfs overlay");
     }
-    let image = work.join("test-initramfs.img");
-    let mut out = File::create(&image)?;
-    std::io::copy(&mut File::open(ctx.initramfs())?, &mut out)?;
-    std::io::copy(&mut File::open(patch)?, &mut out)?;
-    drop(out);
+    let private = prepare_live_fixture(ctx, &work, &patch, &init)?;
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.args(["-machine", "q35", "-m", "4G", "-smp", "2", "-display", "none", "-vga", "virtio", "-serial", "stdio", "-monitor", "none", "-no-reboot"])
-        .arg("-kernel").arg(ctx.kernel_image()).arg("-initrd").arg(image)
+        .arg("-kernel").arg(ctx.kernel_image()).arg("-initrd").arg(private.initramfs())
+        .arg("-drive").arg(format!("file={},format=raw,if=virtio,readonly=on", private.root_image().display()))
         .args(["-append", "rdinit=/usr/bin/init panic=5 console=tty0 console=ttyS0,115200 loglevel=4 aftermath.netwait=5 aftermath.test=session-smoke",
             "-device", "virtio-rng-pci", "-nic", "user,model=virtio-net-pci"]);
     if OpenOptions::new()
@@ -202,4 +204,52 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     println!("Session smoke passed: account creation, interactive/own password changes, password locking, stratum identity sync, two authenticated logins, permissions and final-logout cleanup.");
     println!("Serial log: {}", log_path.display());
     Ok(())
+}
+
+/// Put overrides in the actual root image; bootstrap overlays do not replace it.
+fn prepare_live_fixture(
+    ctx: &Ctx,
+    work: &std::path::Path,
+    patch: &std::path::Path,
+    init: &std::path::Path,
+) -> Result<Ctx> {
+    let private = Ctx {
+        root: ctx.root.clone(),
+        out: work.join("build"),
+        dry_run: false,
+    };
+    ctx.remove(&private.out)?;
+    let root = private.rootfs();
+    crate::image::copy_tree(&ctx.out.join("vm/desktop-smoke/rootfs"), &root)?;
+    ctx.run(
+        Command::new("bsdtar")
+            .args(["-xpf"])
+            .arg(patch)
+            .args([
+                "--no-same-owner",
+                "--no-xattrs",
+                "--no-acls",
+                "--no-fflags",
+                "-C",
+            ])
+            .arg(&root),
+    )?;
+    fs::copy(init, root.join("usr/bin/aftermath-init"))?;
+    fs::copy(
+        init.with_file_name("aftermath-early"),
+        root.join("usr/lib/aftermath/aftermath-early"),
+    )?;
+    // This suite tests Aftermath-owned runtimes. The graphical suite covers
+    // elogind-owned sessions separately. Do not let D-Bus activation silently
+    // switch this fixture to a different runtime owner through optional PAM.
+    let login = root.join("etc/pam.d/login");
+    let policy = fs::read_to_string(&login)?;
+    let policy = policy
+        .lines()
+        .filter(|line| !line.contains("pam_elogind.so"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(login, format!("{policy}\n"))?;
+    crate::live_image::build(&private, &root, init, false)?;
+    Ok(private)
 }

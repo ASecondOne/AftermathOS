@@ -111,9 +111,14 @@ impl Graphical {
     pub fn new(cmdline: &str) -> Self {
         let config = aftermath_ctl::graphical::settings().unwrap_or_default();
         let disabled = !config.enabled
-            || cmdline
-                .split_whitespace()
-                .any(|a| a == "aftermath.desktop=off" || a == "aftermath.test=session-smoke");
+            || cmdline.split_whitespace().any(|a| {
+                matches!(
+                    a,
+                    "aftermath.desktop=off"
+                        | "aftermath.test=session-smoke"
+                        | "aftermath.test=live-smoke"
+                )
+            });
         Self {
             config,
             state: if disabled {

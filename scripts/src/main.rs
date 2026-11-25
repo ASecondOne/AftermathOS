@@ -12,6 +12,7 @@ mod grub;
 mod image;
 mod kernel;
 mod live_image;
+mod live_smoke;
 mod logs;
 mod persist;
 mod plasma;
@@ -50,6 +51,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Verify SquashFS persistence, rescue and GRUB counting on private VM disks
+    SmokeLive {
+        /// Test legacy BIOS instead of UEFI/OVMF
+        #[arg(long)]
+        bios: bool,
+    },
     /// Verify the graphical login and Plasma in a disposable QEMU guest
     SmokeDesktop {
         /// Verify the normal GRUB disk boot, including firmware graphics handoff
@@ -115,6 +122,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let ctx = Ctx::new(cli.dry_run)?;
     match cli.cmd {
+        Cmd::SmokeLive { bios } => live_smoke::run(&ctx, bios),
         Cmd::SmokeDesktop { grub, bios } => desktop_smoke::run(&ctx, grub, bios),
         Cmd::Plasma => plasma::build(&ctx).map(|_| ()),
         Cmd::PlasmaRuntime => plasma::runtime(&ctx).map(|_| ()),
