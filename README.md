@@ -56,6 +56,51 @@ later (see *Next steps*).
 
 Aftermath ships two strata: **arch** (the host, i.e. the booted rootfs `/`)
 and **ubuntu** (Ubuntu 24.04 LTS "noble", in `/aftermath/strata/ubuntu`).
+
+**Add Fedora while running** (root, in normal/full mode):
+
+```sh
+amctl list                         # installed, integrated, state and boot setting
+amctl enable fedora                # download if missing, integrate now, enable at boot
+dnf --version                      # Fedora's package manager, from the same shell
+amctl strata enter fedora          # Fedora bash
+amctl disable fedora               # detach integration; keep installed packages
+```
+
+The default shipment stays Arch + Ubuntu. Fedora is optional and initially off.
+`amctl enable fedora` (also `amctl strata enable fedora`) downloads the official
+[Fedora base image](https://fedoraproject.org/misc/) from
+`quay.io/fedora/fedora:44` using the host's `skopeo`, then unpacks it with `umoci`.
+There is no container daemon: the extracted userland becomes a normal stratum.
+TLS and OCI digests are checked during download; the host's container trust
+policy remains in effect. The image tag selects Fedora 44, not a fixed digest.
+Both tools are included in `config/packages.x86_64`; when updating an older
+development image, run `cargo am rootfs --update` and rebuild the initramfs.
+
+Installation needs network access and free space on the writable strata disk
+(`AFTERMATH_STRATA`); allow space for both the downloaded image and its unpacked
+root. Private staging is kept on that disk, validated and renamed into
+`/aftermath/store/fedora` only on success. Failed transfers are cleaned up, and
+retrying the command is safe. An existing installation is never overwritten or
+downloaded again. A hard kill or power loss may leave a hidden `.install-fedora-*`
+staging directory; it is not an installed stratum. The installer serializes
+downloads, and the engine keeps supervising services during the transfer.
+
+**No reboot is needed in full mode.** Enable bind-mounts Fedora, shares users,
+home directories and DNS, and refreshes command launchers, man-page and desktop
+views immediately. `dnf`, `dnf5`, `yum` and RPM commands are pinned to Fedora;
+package-manager changes refresh integration too. Existing engine shells clear
+their command cache at each prompt; other shells may need `hash -r`.
+This starts the userland integration, not a second init/service manager.
+The boot switch is saved only after successful activation. Installed packages
+persist on the strata disk; the enable/disable switch needs the persistent host
+overlay to survive reboot. Explicit Arch-only/rescue mode still requires booting
+normally before enabling strata.
+
+`amctl list` includes configured optional strata that are not installed yet, so
+`INSTALLED` and `INTEGRATED` distinguish available, stopped and running userlands.
+Only Fedora has an automatic runtime downloader currently; Ubuntu remains
+prebuilt and Windows remains a placeholder.
 From the same shell both package managers work:
 
 ```sh
@@ -369,8 +414,12 @@ How the pieces fit:
   console shells, and marking the boot as good.
 * **Kernel panics reboot**: every entry boots with `panic=5`.
 * **GRUB boot counting** (disk image / installed systems, not the read-only
-  ISO): every boot GRUB sets `boot_success=0` in `/boot/grub/grubenv`. Once
-  the engine is up it sets `boot_success=1 boot_fails=0` (it finds the FAT
+  ISO): GRUB sets `boot_success=0` in `/boot/grub/grubenv` only after the
+  selected kernel and initramfs have loaded, immediately before launching Linux.
+  Rebooting, powering off or entering firmware settings from the menu does not
+  count as a failed boot. Each unconfirmed Linux attempt is counted once on
+  return to GRUB; further menu visits preserve that count. Once the engine is up
+  it sets `boot_success=1 boot_fails=0` (it finds the FAT
   boot partition itself and rewrites the 1024-byte block in place, like GRUB
   does). If a boot never gets that far:
   * 1 failed boot → try **Aftermath OS** again
@@ -446,7 +495,9 @@ the caller's uid with `SO_PEERCRED` on every request.
 
 ```sh
 amctl status                       # mode, root/overlay, network, strata, services, keymap, uptime, boot id
-amctl strata list                  # arch (host), ubuntu, windows (+ state, on at boot?, OS name)
+amctl list                         # installation + integration status, including optional Fedora
+amctl enable fedora                # download once, activate without reboot, enable at boot
+amctl strata list                  # same list (the original subcommands still work)
 amctl strata status ubuntu
 amctl strata stop|start|restart ubuntu
 amctl strata enable|disable ubuntu # now + at every boot
@@ -794,7 +845,7 @@ sudo dd if=out/aftermath-0.1.0-x86_64.iso of=/dev/sdX bs=4M status=progress ofla
 - **Boot layout**: squashfs image as the overlay's lower layer (today the
   lower layer is the RAM initramfs), so RAM use no longer equals the rootfs
   size; then an installer.
-- **Strata**: more strata (Fedora via dnf --installroot, Alpine), cross
+- **Strata**: more downloadable strata (e.g. Alpine), cross
   `.desktop` Exec rewriting, a FUSE crossfs instead of generated symlinks.
 - **Windows stratum**: research phase.
 

@@ -290,9 +290,9 @@ serial --unit=0 --speed=115200
 terminal_input console serial
 
 # ---- Boot counting (plan B) -------------------------------------------
-# Every boot sets boot_success=0. aftermath-engine sets boot_success=1 and
-# boot_fails=0 once the system is up. If a boot never got that far,
-# boot_fails goes up and we pick a safer default:
+# Only launching Linux sets boot_success=0. aftermath-engine resets
+# boot_success=1 and boot_fails=0 once the system is up. On return to GRUB,
+# consume an unconfirmed attempt once and pick a safer default:
 #   0-1 failed boots -> Aftermath OS
 #   2-3 failed boots -> Arch host only (no strata)
 #   4+  failed boots -> BusyBox rescue CLI
@@ -309,12 +309,22 @@ if [ -f /boot/grub/grubenv ]; then
         elif [ "${{boot_fails}}" = "2" ]; then set boot_fails=3
         else set boot_fails=4
         fi
-    else
-        set boot_fails=0
+        # Acknowledge this attempt now. Visiting/rebooting the menu again
+        # must not count the same failure twice or clear genuine failures.
+        set boot_success=1
+        save_env -f /boot/grub/grubenv boot_success boot_fails
     fi
-    set boot_success=0
-    save_env -f /boot/grub/grubenv boot_success boot_fails
 fi
+
+# Called only after both kernel and initramfs loaded successfully. Reboot,
+# poweroff, firmware setup and simply waiting in the menu never arm it.
+function aftermath_boot_attempt {{
+    if [ -f /boot/grub/grubenv ]; then
+        set boot_success=0
+        set aftermath_next=""
+        save_env -f /boot/grub/grubenv boot_success aftermath_next
+    fi
+}}
 
 set default=aftermath
 if [ "${{boot_fails}}" = "4" ]; then
@@ -325,11 +335,9 @@ elif [ "${{boot_fails}}" = "3" ]; then
     set default=aftermath-host
 fi
 # One-shot choice from `amctl boot next host|busybox|clean|...`: used for
-# this boot only, then cleared.
+# the next Linux launch only. Menu-only reboots keep the choice pending.
 if [ -n "${{aftermath_next}}" ]; then
     set default="${{aftermath_next}}"
-    set aftermath_next=""
-    save_env -f /boot/grub/grubenv aftermath_next
 fi
 set timeout=5
 set timeout_style=menu
@@ -354,33 +362,57 @@ fi
 
 menuentry "Aftermath OS" --id aftermath --class aftermath {{
     echo "Loading Aftermath {VERSION} ..."
-    linux /boot/vmlinuz-aftermath {CMDLINE_BASE} {normal} ${{aftermath_args}}
-    initrd /boot/initramfs-aftermath.img
+    if linux /boot/vmlinuz-aftermath {CMDLINE_BASE} {normal} ${{aftermath_args}}; then
+        if initrd /boot/initramfs-aftermath.img; then
+            aftermath_boot_attempt
+            boot
+        fi
+    fi
 }}
 
 menuentry "Aftermath OS (serial console)" --id aftermath-serial --class aftermath {{
-    linux /boot/vmlinuz-aftermath {CMDLINE_BASE} {serial} ${{aftermath_args}}
-    initrd /boot/initramfs-aftermath.img
+    if linux /boot/vmlinuz-aftermath {CMDLINE_BASE} {serial} ${{aftermath_args}}; then
+        if initrd /boot/initramfs-aftermath.img; then
+            aftermath_boot_attempt
+            boot
+        fi
+    fi
 }}
 
 menuentry "Aftermath OS (Arch host only, no strata)" --id aftermath-host --class recovery {{
-    linux /boot/vmlinuz-aftermath {CMDLINE_BASE} aftermath.mode=host {normal} ${{aftermath_args}}
-    initrd /boot/initramfs-aftermath.img
+    if linux /boot/vmlinuz-aftermath {CMDLINE_BASE} aftermath.mode=host {normal} ${{aftermath_args}}; then
+        if initrd /boot/initramfs-aftermath.img; then
+            aftermath_boot_attempt
+            boot
+        fi
+    fi
 }}
 
 menuentry "Aftermath OS (clean image, ignore saved changes)" --id aftermath-clean --class recovery {{
-    linux /boot/vmlinuz-aftermath {CMDLINE_BASE} aftermath.overlay=off {normal} ${{aftermath_args}}
-    initrd /boot/initramfs-aftermath.img
+    if linux /boot/vmlinuz-aftermath {CMDLINE_BASE} aftermath.overlay=off {normal} ${{aftermath_args}}; then
+        if initrd /boot/initramfs-aftermath.img; then
+            aftermath_boot_attempt
+            boot
+        fi
+    fi
 }}
 
 menuentry "Aftermath OS (rescue: BusyBox CLI)" --id aftermath-busybox --class recovery {{
-    linux /boot/vmlinuz-aftermath {CMDLINE_BASE} aftermath.mode=busybox {normal} ${{aftermath_args}}
-    initrd /boot/initramfs-aftermath.img
+    if linux /boot/vmlinuz-aftermath {CMDLINE_BASE} aftermath.mode=busybox {normal} ${{aftermath_args}}; then
+        if initrd /boot/initramfs-aftermath.img; then
+            aftermath_boot_attempt
+            boot
+        fi
+    fi
 }}
 
 menuentry "Aftermath OS (debug: verbose kernel log)" --id aftermath-debug --class aftermath {{
-    linux /boot/vmlinuz-aftermath {CMDLINE_BASE} {debug} ${{aftermath_args}}
-    initrd /boot/initramfs-aftermath.img
+    if linux /boot/vmlinuz-aftermath {CMDLINE_BASE} {debug} ${{aftermath_args}}; then
+        if initrd /boot/initramfs-aftermath.img; then
+            aftermath_boot_attempt
+            boot
+        fi
+    fi
 }}
 
 if [ "$grub_platform" = "efi" ]; then
@@ -565,4 +597,91 @@ fn assemble_mbr_disk(disk: &Path, core: &Path, esp: &Path, esp_len: u64) -> Resu
     f.sync_all()?;
     fs::rename(&tmp, disk)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_visits_do_not_create_or_recount_boot_attempts() {
+        // Execute the generated counter logic with persistent load/save stubs.
+        // GRUB's `set name=value` is the only syntax needing a shell adapter.
+        let cfg = grub_cfg();
+        let counting = cfg
+            .split_once("# ---- Boot counting")
+            .unwrap()
+            .1
+            .split_once("set aftermath_args=")
+            .unwrap()
+            .0;
+        let counting = counting
+            .lines()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("/boot/grub/grubenv", "\"${TEST_ENV}\"");
+        let env =
+            std::env::temp_dir().join(format!("aftermath-grub-counter-{}", std::process::id()));
+        let output = Command::new("bash")
+            .args([
+                "-eu",
+                "-c",
+                r#"
+set() { export "$@"; }
+load_env() { source "$2"; }
+save_env() {
+    printf 'boot_success=%s\nboot_fails=%s\naftermath_next=%s\n' \
+        "$boot_success" "$boot_fails" "$aftermath_next" > "$2"
+}
+printf 'boot_success=1\nboot_fails=0\naftermath_next=aftermath-debug\n' > "$TEST_ENV"
+for visit in 1 2 3; do
+    eval "$BOOT_SCRIPT"
+    test "$boot_fails" = 0
+    test "$boot_success" = 1
+    test "$default" = aftermath-debug
+done
+aftermath_boot_attempt
+test "$boot_success" = 0
+test -z "$aftermath_next"
+for failures in 1 2 3 4; do
+    eval "$BOOT_SCRIPT"
+    test "$boot_fails" = "$failures"
+    test "$boot_success" = 1
+    case "$failures" in
+        1) test "$default" = aftermath ;;
+        2|3) test "$default" = aftermath-host ;;
+        4) test "$default" = aftermath-busybox ;;
+    esac
+    for menu_reboot in 1 2 3; do
+        eval "$BOOT_SCRIPT"
+        test "$boot_fails" = "$failures"
+        test "$boot_success" = 1
+    done
+    aftermath_boot_attempt
+done
+# The engine's success acknowledgement restores the normal default.
+printf 'boot_success=1\nboot_fails=0\naftermath_next=\n' > "$TEST_ENV"
+eval "$BOOT_SCRIPT"
+test "$boot_fails" = 0
+test "$default" = aftermath
+# ISO: no writable environment, no attempt is recorded.
+rm "$TEST_ENV"
+eval "$BOOT_SCRIPT"
+aftermath_boot_attempt
+test ! -e "$TEST_ENV"
+test "$default" = aftermath
+"#,
+            ])
+            .env("TEST_ENV", &env)
+            .env("BOOT_SCRIPT", counting)
+            .output()
+            .unwrap();
+        let _ = fs::remove_file(env);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

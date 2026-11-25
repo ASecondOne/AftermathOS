@@ -32,6 +32,9 @@ use aftermath_strata::cross::{self, Providers, Slot};
 use aftermath_strata::status::STATUS;
 use aftermath_strata::{at, users, BIN_DIRS, CONFIG, CROSS_DIR, STRAT_BIN};
 
+#[path = "aftermath-strata/install.rs"]
+mod install;
+
 pub const DISK_LABEL: &str = "AFTERMATH_STRATA";
 const SHARED_KERNEL: [&str; 3] = ["proc", "sys", "dev"];
 const SHARED_DIRS: [&str; 4] = ["run", "tmp", "home", "root"];
@@ -92,13 +95,17 @@ fn main() {
             Ok(()) => println!("stratum `{target}` is up"),
             Err(e) => fail(&e),
         },
+        "install" => match install_one(&opts, &target) {
+            Ok(()) => println!("stratum `{target}` is installed"),
+            Err(e) => fail(&e),
+        },
         "stop" => match stop_one(&opts, &target, disabled) {
             Ok(()) => println!("stratum `{target}` stopped"),
             Err(e) => fail(&e),
         },
         _ => {
             eprintln!(
-                "usage: aftermath-strata setup|refresh|start <name>|stop <name> [--disabled] \
+                "usage: aftermath-strata setup|refresh|install <name>|start <name>|stop <name> [--disabled] \
                  [--no-disk] [--strat-bin PATH]"
             );
             std::process::exit(2);
@@ -108,6 +115,9 @@ fn main() {
 
 fn fail(msg: &str) -> ! {
     warn(&format!("FAILED: {msg}"));
+    if std::env::var_os("AFTERMATH_KMSG").is_some() {
+        eprintln!("aftermath-strata: FAILED: {msg}");
+    }
     std::process::exit(1)
 }
 
@@ -246,6 +256,23 @@ fn up_list() -> Vec<String> {
         .collect()
 }
 
+fn install_one(opts: &Opts, name: &str) -> Result<(), String> {
+    if !nix::unistd::geteuid().is_root() {
+        return Err("installing a stratum needs root".into());
+    }
+    let cfg = load_config()?;
+    let s = cfg
+        .get(name)
+        .ok_or_else(|| format!("no stratum `{name}` in {CONFIG}"))?;
+    let image = aftermath_strata::catalog::image(s)
+        .ok_or_else(|| format!("no automatic installer for `{name}`"))?;
+    if opts.no_disk {
+        return Err("installation requires the persistent strata disk".into());
+    }
+    let store = prepare(opts, true)?;
+    install::install(&store, name, image)
+}
+
 /// `aftermath-strata start <name>`: bring one stratum up at runtime
 /// (`amctl strata start|enable|restart`).
 fn start_one(opts: &Opts, name: &str) -> Result<(), String> {
@@ -264,7 +291,11 @@ fn start_one(opts: &Opts, name: &str) -> Result<(), String> {
     }
     write_status(name, "up");
     log(&format!("stratum `{name}` ({}) up at {}", s.kind, s.path));
-    cross_links(&cfg, &up_list(), &opts.strat_bin)?;
+    if let Err(e) = cross_links(&cfg, &up_list(), &opts.strat_bin) {
+        write_status(name, &format!("failed: integration: {e}"));
+        return Err(e);
+    }
+    cross_share(&cfg, &up_list());
     Ok(())
 }
 
@@ -293,6 +324,7 @@ fn stop_one(opts: &Opts, name: &str, disabled: bool) -> Result<(), String> {
     write_status(name, if disabled { "disabled" } else { "stopped" });
     log(&format!("stratum `{name}` stopped"));
     cross_links(&cfg, &up_list(), &opts.strat_bin)?;
+    cross_share(&cfg, &up_list());
     Ok(())
 }
 
@@ -311,7 +343,9 @@ fn refresh(opts: &Opts) -> Result<usize, String> {
     if !at(STATUS).exists() {
         return Err("strata were not set up at boot".into());
     }
-    cross_links(&cfg, &up_list(), &opts.strat_bin)
+    let n = cross_links(&cfg, &up_list(), &opts.strat_bin)?;
+    cross_share(&cfg, &up_list());
+    Ok(n)
 }
 
 fn start_stratum(s: &Stratum, opts: &Opts, store: &Path) -> Result<(), String> {
@@ -323,7 +357,7 @@ fn start_stratum(s: &Stratum, opts: &Opts, store: &Path) -> Result<(), String> {
         let src = store.join(&s.name);
         if !src.join("usr").is_dir() {
             return Err(format!(
-                "{} is missing on the strata disk (run `cargo am stratum {}`)",
+                "{} is missing on the strata disk (use `amctl enable {}` for optional strata; build Ubuntu with `cargo am stratum ubuntu`)",
                 src.display(),
                 s.name
             ));
@@ -473,6 +507,7 @@ fn commands(root: &Path) -> BTreeSet<String> {
 }
 
 fn cross_links(cfg: &Config, up: &[String], strat_bin: &str) -> Result<usize, String> {
+    let cfg = cfg.with_running(up);
     let mut providers = Providers::new();
     providers.insert(cfg.host_name().to_owned(), commands(&at("/")));
     for name in up {
@@ -480,7 +515,7 @@ fn cross_links(cfg: &Config, up: &[String], strat_bin: &str) -> Result<usize, St
             providers.insert(name.clone(), commands(&at(&s.path)));
         }
     }
-    let plan = cross::plan(cfg, &providers);
+    let plan = cross::plan(&cfg, &providers);
 
     let base = at(CROSS_DIR);
     for slot in ["pin", "bin"] {
@@ -501,7 +536,16 @@ fn cross_links(cfg: &Config, up: &[String], strat_bin: &str) -> Result<usize, St
 /// Read-only overlays of the strata's man pages and .desktop files, so the
 /// host's `man` (MANPATH) and desktop (XDG_DATA_DIRS) see them. Best effort.
 fn cross_share(cfg: &Config, up: &[String]) {
+    let cfg = cfg.with_running(up);
     for sub in ["man", "applications"] {
+        let target = at(CROSS_DIR).join("share").join(sub);
+        // Rebuild the view on runtime start/stop and package changes as well.
+        if is_mountpoint(&target) {
+            if let Err(e) = nix::mount::umount2(&target, nix::mount::MntFlags::MNT_DETACH) {
+                warn(&format!("cross {sub}: cannot detach old view: {e}"));
+                continue;
+            }
+        }
         let lowers: Vec<String> = cfg
             .order()
             .iter()
@@ -514,7 +558,6 @@ fn cross_share(cfg: &Config, up: &[String]) {
         if lowers.is_empty() {
             continue;
         }
-        let target = at(CROSS_DIR).join("share").join(sub);
         if mkdir(&target).is_err() || is_mountpoint(&target) {
             continue;
         }

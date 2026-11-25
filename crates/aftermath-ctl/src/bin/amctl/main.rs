@@ -51,6 +51,9 @@ fn report_error(cx: &Ctx, err: &str) {
 
 fn run(cx: &Ctx, cmd: Cmd) -> Result<(), String> {
     match cmd {
+        Cmd::List => strata::run(cx, cli::StrataCmd::List),
+        Cmd::Enable { name } => strata::run(cx, cli::StrataCmd::Enable { name }),
+        Cmd::Disable { name } => strata::run(cx, cli::StrataCmd::Disable { name }),
         Cmd::Status => status::run(cx),
         Cmd::Strata(c) => strata::run(cx, c),
         Cmd::Services(c) => services::run(cx, c),

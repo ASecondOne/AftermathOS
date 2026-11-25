@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-#[derive(Deserialize, Default, Debug)]
+#[derive(Deserialize, Default, Debug, Clone)]
 pub struct Config {
     #[serde(default)]
     pub stratum: Vec<Stratum>,
@@ -26,7 +26,7 @@ pub struct Stratum {
     pub enabled: bool,
 }
 
-#[derive(Deserialize, Default, Debug)]
+#[derive(Deserialize, Default, Debug, Clone)]
 pub struct Cross {
     /// Lookup order for commands without a pin. Default: host first, then
     /// the other enabled strata in file order.
@@ -102,6 +102,15 @@ impl Config {
         self.stratum.iter().find(|s| s.name == name)
     }
 
+    /// Command integration follows live state, independently of boot switches.
+    pub fn with_running(&self, up: &[String]) -> Self {
+        let mut cfg = self.clone();
+        for s in &mut cfg.stratum {
+            s.enabled = s.kind == "host" || up.contains(&s.name);
+        }
+        cfg
+    }
+
     /// Enabled strata that are not the host.
     pub fn guests(&self) -> impl Iterator<Item = &Stratum> {
         self.stratum
@@ -135,7 +144,14 @@ impl Config {
             .filter(|n| enabled(n))
             .cloned()
             .collect();
-        for name in shipped {
+        // A newly configured stratum must participate even when an older
+        // explicit cross.order does not mention it yet.
+        for name in shipped.into_iter().chain(
+            self.stratum
+                .iter()
+                .filter(|s| s.enabled)
+                .map(|s| s.name.clone()),
+        ) {
             if !order.contains(&name) {
                 order.push(name);
             }
@@ -205,5 +221,49 @@ pacman = "arch"
         let mut c = Config::parse(CFG).unwrap();
         c.cross.order = vec!["ubuntu".into(), "windows".into(), "arch".into()];
         assert_eq!(c.order(), vec!["ubuntu", "arch"]);
+    }
+
+    #[test]
+    fn optional_fedora_integrates_before_boot_switch_is_saved() {
+        let mut c = Config::parse(include_str!(
+            "../../../config/overlay/etc/aftermath/strata.toml"
+        ))
+        .unwrap();
+        assert_eq!(
+            c.guests().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["ubuntu"]
+        );
+        assert!(crate::catalog::image(c.get("fedora").unwrap()).is_some());
+        // Existing configurations may predate Fedora in the lookup order.
+        c.cross.order = vec!["arch".into(), "ubuntu".into()];
+        let live = c.with_running(&["ubuntu".into(), "fedora".into()]);
+        assert_eq!(live.order(), ["arch", "ubuntu", "fedora"]);
+        let mut providers = crate::cross::Providers::new();
+        providers.insert("arch".into(), ["bash".into(), "rpm".into()].into());
+        providers.insert(
+            "fedora".into(),
+            [
+                "bash".into(),
+                "dnf".into(),
+                "dnf5".into(),
+                "rpm".into(),
+                "fedora-tool".into(),
+            ]
+            .into(),
+        );
+        for cmd in ["dnf", "dnf5", "rpm", "fedora-tool"] {
+            assert_eq!(
+                crate::cross::resolve(&live, &providers, cmd).as_deref(),
+                Some("fedora")
+            );
+        }
+        assert_eq!(
+            crate::cross::resolve(&live, &providers, "bash").as_deref(),
+            Some("arch")
+        );
+        assert!(
+            !c.get("fedora").unwrap().enabled,
+            "live integration must not change boot settings"
+        );
     }
 }

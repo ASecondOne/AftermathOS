@@ -1,9 +1,9 @@
 //! `amctl strata ...`: list, inspect, start/stop and enter strata.
 
 use std::os::unix::process::CommandExt;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-use aftermath_ctl::{facts, STRAT_BIN};
+use aftermath_ctl::{facts, STRATA_SERVICE, STRAT_BIN};
 use serde_json::{json, Value};
 
 use crate::cli::StrataCmd;
@@ -22,6 +22,33 @@ pub fn run(cx: &Ctx, cmd: StrataCmd) -> Result<(), String> {
     };
 
     let args: Vec<&str> = name.as_deref().into_iter().collect();
+    if verb == "enable" {
+        // Preflight through the engine before downloading anything. The long
+        // transfer runs as amctl's child, never in the engine's event loop.
+        let ready = cx
+            .ask("strata", "prepare-enable", &args)?
+            .ok_or_else(|| need_engine("enable"))?;
+        if !is_true(&ready, "installed") && is_true(&ready, "installable") {
+            crate::output::need_root("enable")?;
+            eprintln!(
+                "amctl: downloading and installing {}; this may take a few minutes",
+                args[0]
+            );
+            let status = Command::new(STRATA_SERVICE)
+                .args(["install", args[0]])
+                .stdin(Stdio::null())
+                // Keep --json stdout machine readable, with progress on stderr.
+                .stdout(Stdio::from(std::io::stderr()))
+                .status()
+                .map_err(|e| format!("{STRATA_SERVICE}: {e}"))?;
+            if !status.success() {
+                return Err(format!(
+                    "installation of {} failed ({status}); retry `amctl enable {}`",
+                    args[0], args[0]
+                ));
+            }
+        }
+    }
     let reply = match cx.ask("strata", verb, &args)? {
         Some(v) => v,
         None => offline(verb, name.as_deref())?,
@@ -59,8 +86,8 @@ fn print_list(st: &Style, v: &Value) {
     st.header("strata");
 
     let heading = format!(
-        "{:<10} {:<8} {:<10} {:<8} {}",
-        "NAME", "KIND", "STATE", "AT BOOT", "SYSTEM"
+        "{:<10} {:<8} {:<10} {:<10} {:<10} {:<8} {}",
+        "NAME", "KIND", "INSTALLED", "INTEGRATED", "STATE", "AT BOOT", "SYSTEM"
     );
     println!("  {}", st.dim(&heading));
 
@@ -80,9 +107,15 @@ fn print_list(st: &Style, v: &Value) {
         };
 
         println!(
-            "  {} {:<8} {} {:<8} {}",
+            "  {} {:<8} {:<10} {:<10} {} {:<8} {}",
             st.bold(&format!("{:<10}", text(s, "name"))), // pad before colouring
             text(s, "kind"),
+            if is_true(s, "installed") { "yes" } else { "no" },
+            if is_true(s, "integrated") {
+                "yes"
+            } else {
+                "no"
+            },
             st.state(&format!("{:<10}", text(s, "state"))),
             at_boot,
             system
@@ -95,6 +128,18 @@ fn print_one(st: &Style, s: &Value) {
 
     st.row("state", &st.state(text(s, "state")));
     st.row("kind", text(s, "kind"));
+    st.row(
+        "installed",
+        if is_true(s, "installed") { "yes" } else { "no" },
+    );
+    st.row(
+        "integrated",
+        if is_true(s, "integrated") {
+            "yes"
+        } else {
+            "no"
+        },
+    );
     st.row("path", text(s, "path"));
     st.row("at boot", if is_true(s, "enabled") { "on" } else { "off" });
 

@@ -31,6 +31,9 @@ iputils
 pacman
 archlinux-keyring
 ca-certificates
+# Download and unpack optional strata without a container daemon.
+skopeo
+umoci
 
 # Bootloader (config + theme are added from config/grub by `cargo am`)
 grub

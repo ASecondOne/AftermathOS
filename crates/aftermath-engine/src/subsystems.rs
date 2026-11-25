@@ -105,7 +105,9 @@ impl Subsystem for Strata {
                 Ok(json!({"strata": list?, "mode": facts::mode()}))
             }
             "status" => stratum_json(&cfg, &need_arg(args, "a stratum name")?),
-            "start" | "stop" | "restart" | "enable" | "disable" => {
+            // A root-only preflight. amctl performs the slow transfer outside
+            // this event loop, then returns here for the live activation.
+            "prepare-enable" => {
                 let name = need_arg(args, "a stratum name")?;
                 let s = cfg
                     .get(&name)
@@ -113,10 +115,20 @@ impl Subsystem for Strata {
                 if s.kind == "host" {
                     return Err(format!("`{name}` is the host stratum: always up"));
                 }
-                if matches!(verb, "enable" | "disable") {
-                    let mut sw = Switches::load(Path::new(STATE))?;
-                    sw.strata.insert(name.clone(), verb == "enable");
-                    sw.save(Path::new(STATE))?;
+                if !mode_is_full() {
+                    return Err(
+                        "strata are off in Arch host mode (plan B); boot normally first".into(),
+                    );
+                }
+                stratum_json(&cfg, &name)
+            }
+            "start" | "stop" | "restart" | "enable" | "disable" => {
+                let name = need_arg(args, "a stratum name")?;
+                let s = cfg
+                    .get(&name)
+                    .ok_or_else(|| format!("no stratum `{name}` in {CONFIG}"))?;
+                if s.kind == "host" {
+                    return Err(format!("`{name}` is the host stratum: always up"));
                 }
                 let starting = matches!(verb, "start" | "restart" | "enable");
                 if starting && !mode_is_full() {
@@ -133,6 +145,13 @@ impl Subsystem for Strata {
                 }
                 if starting {
                     run_strata(&["start", &name])?;
+                }
+                // Only persist a switch after successful activation/stop.
+                // A failed enable must not turn a missing stratum on at boot.
+                if matches!(verb, "enable" | "disable") {
+                    let mut sw = Switches::load(Path::new(STATE))?;
+                    sw.strata.insert(name.clone(), verb == "enable");
+                    sw.save(Path::new(STATE))?;
                 }
                 stratum_json(&load_cfg()?, &name)
             }

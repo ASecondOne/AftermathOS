@@ -1,8 +1,9 @@
 //! GRUB environment block: marking the boot as good for GRUB's boot
 //! counter, and `amctl boot next` (one-shot `aftermath_next`).
 //!
-//! GRUB's grub.cfg sets `boot_success=0` and counts `boot_fails` on every
-//! boot (see scripts/src/grub.rs). Once the system is up we set
+//! GRUB arms `boot_success=0` only when launching Linux and counts each
+//! unconfirmed attempt once on return to its menu (scripts/src/grub.rs).
+//! Menu-only reboots do not count. Once the system is up we set
 //! `boot_success=1` and `boot_fails=0` in /boot/grub/grubenv on the boot
 //! partition. If that never happens, GRUB picks the fallback entries.
 //!
@@ -39,7 +40,7 @@ pub const NEXT_TARGETS: &[(&str, &str)] = &[
 ];
 
 /// One-shot: the next boot uses `target` (GRUB clears `aftermath_next`
-/// as soon as it has read it). `none` cancels.
+/// when it launches Linux, not when displaying its menu). `none` cancels.
 pub fn set_next(target: &str) -> Result<String, String> {
     let entry = if target == "none" {
         ""

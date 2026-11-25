@@ -241,7 +241,7 @@ fn which_all(cmd: &str) {
 fn is_package_manager(cmd: &str) -> bool {
     matches!(
         cmd,
-        "apt" | "apt-get" | "aptitude" | "dpkg" | "pacman" | "dnf" | "apk"
+        "apt" | "apt-get" | "aptitude" | "dpkg" | "pacman" | "dnf" | "dnf5" | "yum" | "rpm" | "apk"
     )
 }
 

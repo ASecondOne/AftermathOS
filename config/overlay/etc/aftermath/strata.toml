@@ -22,6 +22,13 @@ kind = "debian"
 enabled = true
 
 [[stratum]]
+name = "fedora"
+# Optional: `amctl enable fedora` downloads the official Fedora userland.
+path = "/aftermath/strata/fedora"
+kind = "fedora"
+enabled = false
+
+[[stratum]]
 name = "windows"
 # Future: native Windows toolchain/runtime stratum (wine-like, not wine).
 path = "/aftermath/strata/windows"
@@ -31,7 +38,7 @@ enabled = false
 [cross]
 # Commands without a pin: the first stratum in this list that has it wins
 # (host first, so `ls`, `bash`, ... are always Arch's).
-order = ["arch", "ubuntu"]
+order = ["arch", "ubuntu", "fedora"]
 
 [cross.pin]
 # Package managers always run in their own stratum, from the same shell.
@@ -46,3 +53,10 @@ makepkg = "arch"
 "debconf*" = "ubuntu"
 "add-apt-repository" = "ubuntu"
 "update-alternatives" = "ubuntu"
+dnf = "fedora"
+"dnf-*" = "fedora"
+dnf5 = "fedora"
+"dnf5-*" = "fedora"
+yum = "fedora"
+rpm = "fedora"
+"rpm*" = "fedora"

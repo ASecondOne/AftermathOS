@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
     bin_name = "amctl",
     version,
     about = "Aftermath control: status, strata, services, logs, boot and power",
-    after_help = "Examples:\n  amctl status\n  amctl strata list\n  amctl strata enter ubuntu\n  \
+    after_help = "Examples:\n  amctl status\n  amctl list\n  amctl enable fedora\n  amctl strata enter ubuntu\n  \
                   amctl which vim\n  amctl default vim ubuntu\n  \
                   amctl services restart heartbeat\n  amctl logs -f --service heartbeat\n  \
                   amctl boot next host\n  amctl overlay reset"
@@ -27,6 +27,12 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
+    /// List strata, including installation and live integration status
+    List,
+    /// Download an optional stratum if missing, then start it now and at boot
+    Enable { name: String },
+    /// Stop a stratum now and keep it off at boot (keeps its installed files)
+    Disable { name: String },
     /// Overview: mode, root/overlay, network, strata, services, uptime
     Status,
     /// Strata (Arch host, Ubuntu, ...)
@@ -83,7 +89,7 @@ pub enum StrataCmd {
     Restart {
         name: String,
     },
-    /// Start now and at every boot
+    /// Download if supported and missing, then start now and at every boot
     Enable {
         name: String,
     },
@@ -199,4 +205,30 @@ pub enum DefaultSub {
         #[arg(long, conflicts_with = "strata")]
         reset: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strata_shortcuts_and_existing_commands_parse() {
+        assert!(matches!(
+            Cli::try_parse_from(["amctl", "list"]).unwrap().cmd,
+            Cmd::List
+        ));
+        assert!(
+            matches!(Cli::try_parse_from(["amctl", "enable", "fedora"]).unwrap().cmd,
+            Cmd::Enable { name } if name == "fedora")
+        );
+        assert!(
+            matches!(Cli::try_parse_from(["amctl", "strata", "enable", "fedora"]).unwrap().cmd,
+            Cmd::Strata(StrataCmd::Enable { name }) if name == "fedora")
+        );
+        assert!(
+            matches!(Cli::try_parse_from(["amctl", "disable", "fedora", "--json"]).unwrap().cmd,
+            Cmd::Disable { name } if name == "fedora")
+        );
+        assert!(Cli::try_parse_from(["amctl", "enable"]).is_err());
+    }
 }

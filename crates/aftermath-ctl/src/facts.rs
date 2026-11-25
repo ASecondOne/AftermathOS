@@ -109,12 +109,7 @@ pub fn network() -> Value {
 
 /// `/run/aftermath/strata` lines: `<name> <state>[: detail]`.
 pub fn strata_status() -> Vec<(String, String)> {
-    fs::read_to_string(format!("{RUN_DIR}/strata"))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| l.split_once(' '))
-        .map(|(n, s)| (n.to_owned(), s.to_owned()))
-        .collect()
+    aftermath_strata::status::read()
 }
 
 pub fn log_dir() -> Option<String> {
@@ -178,8 +173,11 @@ pub fn stratum_json(cfg: &aftermath_strata::config::Config, name: &str) -> Resul
             .map(|(_, st)| st)
             .unwrap_or_else(|| if s.enabled { "down" } else { "disabled" }.into())
     };
-    let root = Path::new(&s.path);
-    let mounted = host || disks::mount_of(root).is_some();
+    let root = aftermath_strata::at(&s.path);
+    let stored = aftermath_strata::at("/aftermath/store").join(&s.name);
+    let mounted = host || disks::mount_of(&root).is_some();
+    let installed = host || root.join("usr/bin").is_dir() || stored.join("usr/bin").is_dir();
+    let integrated = host || (state == "up" && mounted);
     Ok(json!({
         "name": s.name,
         "kind": s.kind,
@@ -188,7 +186,10 @@ pub fn stratum_json(cfg: &aftermath_strata::config::Config, name: &str) -> Resul
         "host": host,
         "state": state,
         "mounted": mounted,
-        "os": if mounted { os_name(root) } else { None },
+        "installed": installed,
+        "integrated": integrated,
+        "installable": aftermath_strata::catalog::image(s).is_some(),
+        "os": os_name(if mounted { &root } else { &stored }),
     }))
 }
 
