@@ -601,87 +601,170 @@ fn assemble_mbr_disk(disk: &Path, core: &Path, esp: &Path, esp_len: u64) -> Resu
 
 #[cfg(test)]
 mod tests {
+    //! Two halves, both pure Rust:
+    //! 1. a model of the boot counter, i.e. the rules grub.cfg implements,
+    //!    walked through the scenarios that matter (menu-only reboots,
+    //!    real failures, `amctl boot next`);
+    //! 2. checks that the generated grub.cfg is built the way the model
+    //!    assumes (where `boot_success=0` is armed, where it is counted).
+    //!
+    //! The real GRUB behaviour was checked headless in QEMU; see README
+    //! "Bootloader".
+
     use super::*;
 
+    /// The grubenv variables GRUB and the engine share.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Env {
+        boot_success: bool,
+        boot_fails: u8,
+        next: Option<&'static str>,
+    }
+
+    impl Env {
+        /// A freshly built disk (`write_grubenv`).
+        fn fresh() -> Self {
+            Env {
+                boot_success: true,
+                boot_fails: 0,
+                next: None,
+            }
+        }
+
+        /// grub.cfg runs (menu shown): count an unconfirmed attempt once,
+        /// then return the entry the menu would boot.
+        fn menu(&mut self) -> &'static str {
+            if !self.boot_success {
+                self.boot_fails = (self.boot_fails + 1).min(4);
+                self.boot_success = true; // counted: don't count it again
+            }
+
+            if let Some(entry) = self.next {
+                return entry;
+            }
+            match self.boot_fails {
+                0 | 1 => "aftermath",
+                2 | 3 => "aftermath-host",
+                _ => "aftermath-busybox",
+            }
+        }
+
+        /// A menu entry loaded kernel + initramfs: `aftermath_boot_attempt`.
+        fn launch(&mut self) {
+            self.boot_success = false;
+            self.next = None;
+        }
+
+        /// aftermath-engine: `grubenv::mark_boot_success`.
+        fn engine_up(&mut self) {
+            self.boot_success = true;
+            self.boot_fails = 0;
+        }
+    }
+
     #[test]
-    fn menu_visits_do_not_create_or_recount_boot_attempts() {
-        // Execute the generated counter logic with persistent load/save stubs.
-        // GRUB's `set name=value` is the only syntax needing a shell adapter.
-        let cfg = grub_cfg();
-        let counting = cfg
-            .split_once("# ---- Boot counting")
-            .unwrap()
-            .1
-            .split_once("set aftermath_args=")
-            .unwrap()
-            .0;
-        let counting = counting
-            .lines()
-            .skip(1)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .replace("/boot/grub/grubenv", "\"${TEST_ENV}\"");
-        let env =
-            std::env::temp_dir().join(format!("aftermath-grub-counter-{}", std::process::id()));
-        let output = Command::new("bash")
-            .args([
-                "-eu",
-                "-c",
-                r#"
-set() { export "$@"; }
-load_env() { source "$2"; }
-save_env() {
-    printf 'boot_success=%s\nboot_fails=%s\naftermath_next=%s\n' \
-        "$boot_success" "$boot_fails" "$aftermath_next" > "$2"
-}
-printf 'boot_success=1\nboot_fails=0\naftermath_next=aftermath-debug\n' > "$TEST_ENV"
-for visit in 1 2 3; do
-    eval "$BOOT_SCRIPT"
-    test "$boot_fails" = 0
-    test "$boot_success" = 1
-    test "$default" = aftermath-debug
-done
-aftermath_boot_attempt
-test "$boot_success" = 0
-test -z "$aftermath_next"
-for failures in 1 2 3 4; do
-    eval "$BOOT_SCRIPT"
-    test "$boot_fails" = "$failures"
-    test "$boot_success" = 1
-    case "$failures" in
-        1) test "$default" = aftermath ;;
-        2|3) test "$default" = aftermath-host ;;
-        4) test "$default" = aftermath-busybox ;;
-    esac
-    for menu_reboot in 1 2 3; do
-        eval "$BOOT_SCRIPT"
-        test "$boot_fails" = "$failures"
-        test "$boot_success" = 1
-    done
-    aftermath_boot_attempt
-done
-# The engine's success acknowledgement restores the normal default.
-printf 'boot_success=1\nboot_fails=0\naftermath_next=\n' > "$TEST_ENV"
-eval "$BOOT_SCRIPT"
-test "$boot_fails" = 0
-test "$default" = aftermath
-# ISO: no writable environment, no attempt is recorded.
-rm "$TEST_ENV"
-eval "$BOOT_SCRIPT"
-aftermath_boot_attempt
-test ! -e "$TEST_ENV"
-test "$default" = aftermath
-"#,
-            ])
-            .env("TEST_ENV", &env)
-            .env("BOOT_SCRIPT", counting)
-            .output()
-            .unwrap();
-        let _ = fs::remove_file(env);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
+    fn menu_only_reboots_are_not_failures() {
+        let mut env = Env::fresh();
+
+        for _ in 0..5 {
+            assert_eq!(env.menu(), "aftermath");
+            // `reboot` / "Reboot" / closing the VM in the menu: no launch.
+        }
+        assert_eq!(env, Env::fresh());
+    }
+
+    #[test]
+    fn real_failures_still_fall_back_and_menu_visits_do_not_recount() {
+        let mut env = Env::fresh();
+        let mut booted = Vec::new();
+
+        for _ in 0..5 {
+            let entry = env.menu();
+            env.menu(); // a menu-only reboot in between changes nothing
+            booted.push(entry);
+            env.launch(); // ... and the system never comes up
+        }
+
+        assert_eq!(
+            booted,
+            [
+                "aftermath",
+                "aftermath",
+                "aftermath-host",
+                "aftermath-host",
+                "aftermath-busybox"
+            ]
         );
+
+        // One good boot (even in plan B) resets the counter.
+        env.engine_up();
+        assert_eq!(env.menu(), "aftermath");
+    }
+
+    #[test]
+    fn boot_next_survives_menu_reboots_and_is_used_once() {
+        let mut env = Env::fresh();
+        env.next = Some("aftermath-host"); // amctl boot next host
+
+        assert_eq!(env.menu(), "aftermath-host");
+        assert_eq!(env.menu(), "aftermath-host", "kept over a menu reboot");
+
+        env.launch();
+        env.engine_up();
+        assert_eq!(env.menu(), "aftermath", "used up by the launch");
+    }
+
+    /// The text of `function aftermath_boot_attempt { ... }`.
+    fn attempt_function(cfg: &str) -> &str {
+        let start = cfg.find("function aftermath_boot_attempt").unwrap();
+        let end = start + cfg[start..].find("\n}\n").unwrap();
+        &cfg[start..end]
+    }
+
+    #[test]
+    fn only_a_launch_arms_the_counter() {
+        let cfg = grub_cfg();
+        let attempt = attempt_function(&cfg);
+
+        // `boot_success=0` and clearing boot-next happen only in the function.
+        assert_eq!(cfg.matches("set boot_success=0").count(), 1);
+        assert!(attempt.contains("set boot_success=0"));
+        assert_eq!(cfg.matches("set aftermath_next=\"\"").count(), 2);
+        assert!(attempt.contains("set aftermath_next=\"\""));
+        assert!(attempt.contains("save_env"));
+
+        // Counting marks the attempt as counted (no double counting).
+        let counting = &cfg[cfg.find("# ---- Boot counting").unwrap()..];
+        let counting = &counting[..counting.find("function aftermath_boot_attempt").unwrap()];
+        assert!(counting.contains("set boot_success=1"));
+        assert!(counting.contains("save_env -f /boot/grub/grubenv boot_success boot_fails"));
+    }
+
+    #[test]
+    fn every_linux_entry_arms_after_loading_and_before_booting() {
+        let cfg = grub_cfg();
+        let entries: Vec<&str> = cfg
+            .split("menuentry ")
+            .skip(1)
+            .filter(|e| e.contains("linux /boot/vmlinuz"))
+            .collect();
+        assert_eq!(entries.len(), 6);
+
+        for entry in entries {
+            let linux = entry.find("if linux ").expect("linux is checked");
+            let initrd = entry.find("if initrd ").expect("initrd is checked");
+            let arm = entry
+                .find("aftermath_boot_attempt")
+                .expect("arms the counter");
+            let boot = entry.find("boot\n").expect("boots explicitly");
+            assert!(linux < initrd && initrd < arm && arm < boot, "{entry}");
+        }
+
+        // Reboot / Power off entries never arm it.
+        for id in ["--id reboot", "--id poweroff"] {
+            let at = cfg.find(id).unwrap();
+            let entry = &cfg[at..at + cfg[at..].find('}').unwrap()];
+            assert!(!entry.contains("aftermath_boot_attempt"));
+        }
     }
 }

@@ -7,6 +7,9 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// `aftermath-strata install <name>`: download `image` (skopeo), unpack it
+/// (umoci) and publish it as `<store>/<name>`. Safe to retry: a missing or
+/// failed install leaves nothing behind, an existing one is kept as is.
 pub fn install(store: &Path, name: &str, image: &str) -> Result<(), String> {
     install_with(store, name, |stage| {
         let layout = stage.join("image");
@@ -22,6 +25,9 @@ pub fn install(store: &Path, name: &str, image: &str) -> Result<(), String> {
     })
 }
 
+/// The install steps around a `fetch` that fills `<stage>/bundle/rootfs`
+/// (tests pass a fake one): lock, keep an existing install, stage in a
+/// private directory, validate, then publish with a no-replace rename.
 fn install_with(
     store: &Path,
     name: &str,
@@ -61,6 +67,8 @@ fn install_with(
     Ok(())
 }
 
+/// A usable Fedora tree: a directory with Fedora's os-release, bash, dnf
+/// and rpm.
 fn validate(root: &Path) -> Result<(), String> {
     let meta = fs::symlink_metadata(root).map_err(|e| format!("{}: {e}", root.display()))?;
     let release = fs::read_to_string(root.join("usr/lib/os-release"))
@@ -76,7 +84,11 @@ fn validate(root: &Path) -> Result<(), String> {
         || !root.join("usr/bin/dnf").is_file()
         || !root.join("usr/bin/rpm").is_file()
     {
-        return Err(format!("{} is not a complete Fedora rootfs (requires Fedora os-release, bash, dnf and rpm); existing files were kept", root.display()));
+        return Err(format!(
+            "{} is not a complete Fedora rootfs \
+             (needs a Fedora os-release, bash, dnf and rpm); existing files were kept",
+            root.display()
+        ));
     }
     Ok(())
 }

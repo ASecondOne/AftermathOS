@@ -72,8 +72,16 @@ The default shipment stays Arch + Ubuntu. Fedora is optional and initially off.
 [Fedora base image](https://fedoraproject.org/misc/) from
 `quay.io/fedora/fedora:44` using the host's `skopeo`, then unpacks it with `umoci`.
 There is no container daemon: the extracted userland becomes a normal stratum.
-TLS and OCI digests are checked during download; the host's container trust
-policy remains in effect. The image tag selects Fedora 44, not a fixed digest.
+The image is **pinned by digest** (`FEDORA_IMAGE` in
+`crates/aftermath-strata/src/catalog.rs`, the multi-arch index of `fedora:44`
+as of 2026-11-25): the download goes over TLS and every manifest and layer must
+match that digest. There is **no publisher signature check** (no sigstore
+policy). To move to a newer Fedora image, look up the tag's current digest and
+update the constant; inside the stratum, `dnf upgrade` updates packages as usual.
+
+`amctl enable` **needs the running engine** (it asks the engine first, then
+downloads, then has the engine start the stratum). In BusyBox rescue or when
+the engine is down it says so and changes nothing; `amctl list` still works.
 Both tools are included in `config/packages.x86_64`; when updating an older
 development image, run `cargo am rootfs --update` and rebuild the initramfs.
 
@@ -425,6 +433,20 @@ How the pieces fit:
   * 1 failed boot → try **Aftermath OS** again
   * 2–3 failed boots → default becomes **Arch host only**
   * 4+ failed boots → default becomes **rescue: BusyBox CLI**
+  * **The counting window**: a boot counts as failed if anything stops it
+    between GRUB launching Linux and the engine marking it good, which happens
+    once the consoles are up (after strata and the network wait, so up to
+    ~15 s more without a network). Powering off or resetting the VM in that
+    window, even on purpose, counts as one failed boot. Two in a row make the
+    next boot Arch host only; the next good boot resets the counter.
+  * **The boot partition must be writable by GRUB**: GRUB's `save_env` only
+    writes grubenv on plain filesystems such as FAT (the disk image) or ext4.
+    Keep `/boot/grub` on one of those on installed systems; on btrfs, LVM,
+    RAID or encrypted `/boot` GRUB can't save and boot counting silently
+    stops (the system still boots, just without the automatic fallback).
+  * The counter's rules are unit-tested as a pure-Rust model plus checks on the
+    generated grub.cfg (`scripts/src/grub.rs`); menu-only reboots vs. real
+    failures were checked headless in QEMU on copies of the disk image.
 * Pick a layer by hand with the GRUB entries, or on the kernel command line:
   `aftermath.mode=host`, `aftermath.mode=busybox` (`aftermath.rescue` works too).
 * Fallback messages are logged at error level, so they show on screen and in

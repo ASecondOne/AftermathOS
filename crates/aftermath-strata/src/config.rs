@@ -102,7 +102,12 @@ impl Config {
         self.stratum.iter().find(|s| s.name == name)
     }
 
-    /// Command integration follows live state, independently of boot switches.
+    /// A copy in which "enabled" means "running now": the host and the
+    /// strata in `up` are on, every other stratum is off.
+    ///
+    /// Launchers, `amctl which` and `amctl default` use this, so a stratum
+    /// started at runtime takes part right away, while the boot switches
+    /// (`enabled` in strata.toml / state.toml) stay as they are.
     pub fn with_running(&self, up: &[String]) -> Self {
         let mut cfg = self.clone();
         for s in &mut cfg.stratum {
@@ -144,14 +149,15 @@ impl Config {
             .filter(|n| enabled(n))
             .cloned()
             .collect();
-        // A newly configured stratum must participate even when an older
-        // explicit cross.order does not mention it yet.
-        for name in shipped.into_iter().chain(
-            self.stratum
-                .iter()
-                .filter(|s| s.enabled)
-                .map(|s| s.name.clone()),
-        ) {
+        // Then the rest of the shipped order, then any enabled stratum an
+        // older explicit `cross.order` doesn't mention yet (e.g. fedora).
+        let others = self
+            .stratum
+            .iter()
+            .filter(|s| s.enabled)
+            .map(|s| s.name.clone());
+
+        for name in shipped.into_iter().chain(others) {
             if !order.contains(&name) {
                 order.push(name);
             }

@@ -82,12 +82,13 @@ fn offline(verb: &str, name: Option<&str>) -> Result<Value, String> {
     }
 }
 
+/// One line per stratum, fitting an 80-column console.
 fn print_list(st: &Style, v: &Value) {
     st.header("strata");
 
     let heading = format!(
-        "{:<10} {:<8} {:<10} {:<10} {:<10} {:<8} {}",
-        "NAME", "KIND", "INSTALLED", "INTEGRATED", "STATE", "AT BOOT", "SYSTEM"
+        "{:<8} {:<8} {:<4} {:<4} {:<9} {:<6} {}",
+        "NAME", "KIND", "INST", "LIVE", "STATE", "BOOT", "SYSTEM"
     );
     println!("  {}", st.dim(&heading));
 
@@ -107,19 +108,27 @@ fn print_list(st: &Style, v: &Value) {
         };
 
         println!(
-            "  {} {:<8} {:<10} {:<10} {} {:<8} {}",
-            st.bold(&format!("{:<10}", text(s, "name"))), // pad before colouring
+            "  {} {:<8} {:<4} {:<4} {} {:<6} {}",
+            st.bold(&format!("{:<8}", text(s, "name"))), // pad before colouring
             text(s, "kind"),
-            if is_true(s, "installed") { "yes" } else { "no" },
-            if is_true(s, "integrated") {
-                "yes"
-            } else {
-                "no"
-            },
-            st.state(&format!("{:<10}", text(s, "state"))),
+            yes_no(s, "installed"),
+            yes_no(s, "integrated"),
+            st.state(&format!("{:<9}", text(s, "state"))),
             at_boot,
             system
         );
+    }
+
+    let legend = "INST: installed on the strata disk   LIVE: its commands work right now";
+    println!("  {}", st.dim(legend));
+}
+
+/// "yes" / "no" for a boolean field.
+fn yes_no(v: &Value, key: &str) -> &'static str {
+    if is_true(v, key) {
+        "yes"
+    } else {
+        "no"
     }
 }
 
@@ -128,18 +137,8 @@ fn print_one(st: &Style, s: &Value) {
 
     st.row("state", &st.state(text(s, "state")));
     st.row("kind", text(s, "kind"));
-    st.row(
-        "installed",
-        if is_true(s, "installed") { "yes" } else { "no" },
-    );
-    st.row(
-        "integrated",
-        if is_true(s, "integrated") {
-            "yes"
-        } else {
-            "no"
-        },
-    );
+    st.row("installed", yes_no(s, "installed"));
+    st.row("integrated", yes_no(s, "integrated"));
     st.row("path", text(s, "path"));
     st.row("at boot", if is_true(s, "enabled") { "on" } else { "off" });
 
