@@ -218,6 +218,9 @@ pub enum KeymapCmd {
 
 #[derive(clap::Args)]
 pub struct LogsArgs {
+    /// Desktop aggregate or a desktop provider's log
+    #[arg(value_parser = ["desktop", "udev", "dbus", "elogind", "sddm"], conflicts_with_all = ["service", "kernel", "console"])]
+    pub topic: Option<String>,
     /// Keep printing new lines
     #[arg(short, long)]
     pub follow: bool,

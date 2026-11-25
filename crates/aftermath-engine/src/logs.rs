@@ -17,9 +17,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const STORE: &str = "/aftermath/store";
 const KEEP_BOOTS: usize = 30;
 
+#[path = "logs/desktop.rs"]
+mod desktop;
+pub use desktop::{desktop_event, start_desktop_tap};
+#[path = "logs/native.rs"]
+mod native;
+pub use native::start_native_receivers;
+
 pub fn session_dir() -> Option<PathBuf> {
     let base = if is_mountpoint(STORE) {
         PathBuf::from(STORE).join("logs")
+    } else if aftermath_ctl::overlay::status()["persistent"] == true {
+        PathBuf::from("/var/log/aftermath")
     } else {
         PathBuf::from("/run/aftermath/logs")
     };

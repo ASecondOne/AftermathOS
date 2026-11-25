@@ -110,6 +110,7 @@ fn main() {
 
     // ---- keyboard (first, so every console starts with the right layout)
     let _ = fs::create_dir_all("/run/aftermath");
+    logs::start_native_receivers();
     let keymap = subsystems::keyboard_boot();
     graphical::system_accounts();
 
@@ -147,6 +148,7 @@ fn main() {
     if let Some(d) = &log_dir {
         let _ = fs::write(aftermath_ctl::LOGDIR_FILE, format!("{}\n", d.display()));
         logs::start_kmsg_tap(d);
+        logs::start_desktop_tap(d);
         log(&format!(
             "session logs (consoles + kernel log) in {}",
             d.display()

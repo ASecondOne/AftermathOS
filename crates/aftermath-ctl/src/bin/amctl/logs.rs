@@ -35,7 +35,11 @@ fn log_dir() -> Result<PathBuf, String> {
         return Ok(PathBuf::from(dir));
     }
 
-    for latest in ["/aftermath/store/logs/latest", "/run/aftermath/logs/latest"] {
+    for latest in [
+        "/aftermath/store/logs/latest",
+        "/var/log/aftermath/latest",
+        "/run/aftermath/logs/latest",
+    ] {
         if Path::new(latest).is_dir() {
             return fs::canonicalize(latest).map_err(|e| e.to_string());
         }
@@ -70,6 +74,14 @@ fn list(cx: &Ctx, dir: &Path) -> Result<(), String> {
 /// Which file to show, and an optional substring every line must contain.
 /// Default: only Aftermath's own lines from the kernel log.
 fn pick_file(dir: &Path, args: &LogsArgs) -> Result<(PathBuf, Option<&'static str>), String> {
+    if let Some(topic) = &args.topic {
+        let path = if topic == "desktop" {
+            dir.join("desktop.log")
+        } else {
+            dir.join("services").join(format!("{topic}.log"))
+        };
+        return Ok((path, None));
+    }
     if let Some(service) = &args.service {
         if !aftermath_ctl::services::valid_name(service) {
             return Err(format!("invalid service name `{service}`"));
