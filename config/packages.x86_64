@@ -63,3 +63,7 @@ qt6-wayland
 ttf-dejavu
 xorg-xwayland
 polkit-kde-agent
+pipewire
+pipewire-pulse
+wireplumber
+plasma-pa

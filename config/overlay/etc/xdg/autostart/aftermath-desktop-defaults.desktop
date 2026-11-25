@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Aftermath desktop defaults
+Exec=/usr/lib/aftermath/aftermath-desktop-defaults
+OnlyShowIn=KDE;
+NoDisplay=true
+X-KDE-autostart-phase=2

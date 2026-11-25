@@ -11,7 +11,7 @@
 //! ```
 //!
 //! At boot the engine derives /etc/vconsole.conf and
-//! /etc/X11/xorg.conf.d/00-keyboard.conf from it and loads the console
+//! /etc/X11/xorg.conf.d/00-keyboard.conf and /etc/xdg/kxkbrc from it, then loads the console
 //! keymap: with kbd's `loadkeys` if installed, otherwise (plan B) with the
 //! built-in loader below, which feeds a precompiled binary keymap
 //! (/usr/share/aftermath/keymaps/<name>.bmap, made at image build time
@@ -120,12 +120,26 @@ pub fn xorg_conf(l: &Locale) -> String {
     lines.join("\n") + "\n"
 }
 
+/// KDE's system defaults for KWin Wayland; user keyboard choices take priority.
+pub fn kde_conf(locale: &Locale) -> String {
+    let value = |text: &str| {
+        text.replace('\\', "\\\\")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    };
+    format!("# Generated from /etc/aftermath/aftermath.toml [locale]\n\
+        [Layout]\nUse=true\nModel={}\nLayoutList={}\nVariantList={}\nOptions={}\nResetOldOptions=true\n",
+        value(&locale.xkb_model), value(&locale.xkb_layout),
+        value(&locale.xkb_variant), value(&locale.xkb_options))
+}
+
 /// Write the derived files under `root` if they differ. Returns the changed paths.
 pub fn write_derived(l: &Locale, root: &Path) -> Vec<String> {
     let mut changed = Vec::new();
     for (rel, text) in [
         ("etc/vconsole.conf", vconsole_conf(l)),
         ("etc/X11/xorg.conf.d/00-keyboard.conf", xorg_conf(l)),
+        ("etc/xdg/kxkbrc", kde_conf(l)),
     ] {
         let p = root.join(rel);
         if fs::read_to_string(&p).ok().as_deref() == Some(text.as_str()) {
@@ -369,6 +383,9 @@ mod tests {
         assert!(x.contains("Option \"XkbLayout\" \"de\""));
         assert!(x.contains("Option \"XkbVariant\" \"nodeadkeys\""));
         assert!(!x.contains("XkbOptions"));
+        let kde = kde_conf(&l);
+        assert!(kde.contains("LayoutList=de\nVariantList=nodeadkeys\n"));
+        assert!(kde.contains("Use=true\nModel=pc105\n"));
     }
 
     #[test]

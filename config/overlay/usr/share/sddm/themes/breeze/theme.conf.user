@@ -1,0 +1,6 @@
+[General]
+showlogo=hidden
+showClock=true
+type=image
+color=#100917
+background=/run/aftermath/greeter/background.svg
