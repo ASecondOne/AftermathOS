@@ -417,8 +417,35 @@ the next one by itself:
 | 1. **Full** | `aftermath-engine --mode full`: strata + services + shells | strata fail → engine keeps going in host mode (logged); engine crashes 3x → layer 2 |
 | 2. **Arch host** | `aftermath-engine --mode host`: plain Arch, no strata | engine crashes 3x → layer 3 |
 | 3. **BusyBox rescue** | static BusyBox shell on every console (`/usr/lib/aftermath/rescue/busybox`), all partitions mounted **read-only** under `/mnt/<dev>` | – |
-| before layer 1 | aftermath-early mounts SquashFS and the writable upper layer | bad upper → temporary layer; missing/mismatched root image → bootstrap BusyBox |
+| before layer 1 | `aftermath-early` mounts the SquashFS root image and the writable layer on top (see below) | saved changes unusable → temporary RAM layer; root image missing → BusyBox from the initramfs |
 | last resort | if PID 1 itself panics, it catches the panic and goes to layer 3 | – |
+
+The root filesystem itself has its own chain, before any of the layers above:
+
+1. **Root image + saved changes**: the read-only SquashFS root
+   (`/boot/rootfs-aftermath.squashfs` on the boot partition) with the
+   `AFTERMATH_HOST` disk as the writable layer on top.
+2. **Root image + temporary RAM layer**: the saved-changes disk is missing,
+   can't be mounted, or its changes would hide init, the engine or bash. The
+   system boots normally, but changes are lost at poweroff. The shell banner
+   shows a red warning; the saved disk is not touched.
+3. **BusyBox from the initramfs**: the root image is missing or does not
+   match this build. The small initramfs carries its own static BusyBox, so
+   this works even when everything on disk is broken.
+
+Desktop boots and the consoles:
+
+* **tty1**: SDDM (Plasma login). No shell runs there, so nothing flashes
+  before the login screen.
+* **tty2**: password login (`[console] login_ttys` in `aftermath.toml`).
+* **tty3**: development root shell (Ctrl+Alt+F3); serial console as before.
+* **Desktop fails** (SDDM/elogind give up): the engine switches back to tty1,
+  starts the root shell there and prints a red `Desktop failed: ...` line.
+  Details: `amctl logs desktop` (or `udev`, `dbus`, `elogind`, `sddm`).
+* **GRUB "console only"** (`amctl boot next console`): boots with
+  `aftermath.desktop=off`, the classic root shell on tty1, no SDDM. Only the
+  default entry is quiet (`quiet`, no logo, no cursor); every recovery entry
+  shows the full boot text.
 
 How the pieces fit:
 
